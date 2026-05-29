@@ -10,7 +10,7 @@ easypackages::libraries(c("readr","readxl","dplyr","tidyr","ggplot2","ggpubr","f
 directory_path <- here::here()
 folder_path <- paste0(directory_path, "/Supplemental Tables/") # folder containing downloaded data sets
 intermediate_folder_path <- paste0(directory_path, "/Intermediate Files Used in Plots/") # path containing intermediate outputs
-folder_path_save <- paste0(directory_path, "/Figure_Panels_for_Illustrator/")# define folder path to save images to
+folder_path_save <- paste0(directory_path, "/Complete Figures/")# define folder path to save images to
 folder_path_code <- paste0(directory_path, "/Functions and General Analysis Code/") # change this to folder containing downloaded functions and code
 
 # Read in data
