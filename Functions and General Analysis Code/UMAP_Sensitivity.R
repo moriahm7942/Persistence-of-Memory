@@ -1,10 +1,11 @@
 easypackages::libraries(c(
   "readr","readxl","dplyr","tidyr","ggplot2","ggpubr","cowplot","grid","ggplotify",
-  "uwot","ComplexUpset","purrr","vegan","cluster","tibble"
+  "uwot","ComplexUpset","purrr","vegan","cluster","tibble", "here"
 ))
 
 # insert path to folders
-directory_path <- "~/HMS Dropbox/Moriah Mitchell/Elledge Lab/AVARS 2025/November_2025_Revision" # CHANGE THIS to path to director enclosing code and data sets
+# Define paths relative to the root of the cloned GitHub repository
+directory_path <- here::here()
 folder_path <- paste0(directory_path, "/Supplemental Tables/") # folder containing downloaded data sets
 intermediate_folder_path <- paste0(directory_path, "/Intermediate Files Used in Plots/") # path containing intermediate outputs
 
