@@ -1,0 +1,1179 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+easypackages::libraries(c("readr","readxl","dplyr","tidyr","ggplot2","ggpubr","cowplot","grid","ggplotify","uwot","purrr","vegan","cluster"))
+# insert path to folders
+directory_path <- "" # CHANGE THIS to path to director enclosing code and data sets
+folder_path <- paste0(directory_path, "/Supplemental Tables/") # folder containing downloaded data sets
+intermediate_folder_path <- paste0(directory_path, "/Intermediate Files Used in Plots/") # path containing intermediate outputs
+folder_path_save <- paste0(directory_path, "/Complete Figures/")# define folder path to save images to
+
+# Load Supplemental Data
+combined_metadata_dist <- read_csv(paste0(folder_path,"Data Table S1.csv"))
+all_zs_combined <- read_csv(paste0(folder_path,"Data Table S2.csv"))
+all_hits_combined <- read_csv(paste0(folder_path,"Data Table S3.csv"))
+Viral_Annotations <- read_csv(paste0(folder_path,"Data Table S4.csv"))
+AVARS_virscores <- read_csv(paste0(folder_path,"Data Table S5.csv"))
+IgG_Data <- read_csv(paste0(folder_path,"Data Table S6.csv"))
+
+# Load intermediate files
+adult_viral_peptide_prevalence <- read.csv(paste0(intermediate_folder_path,"adult_viral_peptide_prevalence.csv"))
+Child_viral_peptide_prevalence <- read.csv(paste0(intermediate_folder_path,"Child_viral_peptide_prevalence.csv"))
+
+# Load required functions
+subset_frame_fxn<-function(wide_df,sample_metadata,dataset_lab) {
+  sample_list<-sample_metadata$identifier[which(sample_metadata[[dataset_lab]]==TRUE)]
+  filtered_df<-wide_df %>% select(c(id,all_of(sample_list)))
+  return(filtered_df)
+}
+family_breakdown_prop_fn<-function(Hit_frame,peptide_family_labels) {
+  peptide_labels <- peptide_family_labels %>% select(c(id,family_label))
+  family_breakdown <- Hit_frame %>% left_join(peptide_labels) %>% pivot_longer(-c(id,family_label),names_to = "identifier",values_to = "Hit") %>% filter(Hit==1)%>% group_by(identifier,family_label) %>% summarise(n_hits=sum(Hit)) %>% pivot_wider(id_cols = identifier,names_from = family_label,values_from = n_hits,values_fill = 0) %>% mutate(tot_hits=Other+Herpesviridae+ Picornaviridae+ Orthomyxoviridae+ Pneumoviridae+Adenoviridae+Coronaviridae+Paramyxoviridae) 
+  family_breakdown_prop<-family_breakdown %>% mutate(Other=Other/tot_hits,Herpesviridae=Herpesviridae/tot_hits, Picornaviridae=Picornaviridae/tot_hits, Orthomyxoviridae=Orthomyxoviridae/tot_hits, Pneumoviridae=Pneumoviridae/tot_hits, Adenoviridae=Adenoviridae/tot_hits,  Coronaviridae=Coronaviridae/tot_hits, Paramyxoviridae=Paramyxoviridae/tot_hits)
+return(family_breakdown_prop)
+}
+pal1<-c("#F87E2E", "#FFEC33", "#1FAA79", "#14C4F8", "#0077C8", "#9870F5", "#D53EE1", "#FF36B0", "#D72638", "#6E6E6E") 
+```
+
+
+
+### Figure 2A
+# Create UMAP
+Visualize the UMAP 2D results: color by time intervals  
+```{r visualize the UMAP calculate with hits, fig.height = 3, fig.width = 5}
+adult_child_longzs <- all_hits_combined %>%
+  dplyr::select(c(id, all_of(IgG_Data$identifier))) %>%
+  tidyr::pivot_longer(-id, names_to = "identifier", values_to = "hit") %>%
+  dplyr::left_join(
+    IgG_Data %>% dplyr::select(c(identifier, donor, time_interval, Age_Years, age_group, interval_label)),
+    by = "identifier"
+  ) %>%
+  dplyr::mutate(age_group = ifelse(age_group == ">1yr", "1-3yr", age_group)) %>%
+  dplyr::bind_rows(
+    subset_frame_fxn(all_hits_combined, combined_metadata_dist, "adult_cross") %>%
+      tidyr::pivot_longer(-id, names_to = "identifier", values_to = "hit") %>%
+      dplyr::left_join(
+        combined_metadata_dist %>%
+          dplyr::mutate(time_interval = 40, age_group = "adult", interval_label = "Adult") %>%
+          dplyr::select(c(identifier, donor, time_interval, Age_Years, age_group, interval_label)),
+        by = "identifier"
+      )
+  )
+
+temp <- adult_child_longzs %>%
+  dplyr::select(c(identifier, interval_label)) %>%
+  dplyr::distinct() %>%
+  dplyr::group_by(interval_label) %>%
+  dplyr::summarise(n_in_group = dplyr::n(), .groups = "drop") %>%
+  dplyr::mutate(interval_label_updated = paste0(interval_label, " (", n_in_group, ")"))
+
+adult_child_longzs <- adult_child_longzs %>%
+  dplyr::left_join(temp %>% dplyr::select(-n_in_group), by = "interval_label")
+rm(temp)
+
+# Sample metadata (one row per identifier)
+sample_meta <- adult_child_longzs %>%
+  dplyr::group_by(donor, identifier, Age_Years, time_interval, interval_label, interval_label_updated) %>%
+  dplyr::summarise(sum_hit = sum(hit), .groups = "drop") %>%
+  dplyr::mutate(key = identifier)
+
+# Build sample-by-peptide binary matrix (rows = identifier)
+hit_unfiltered_matrix <- adult_child_longzs %>%
+  dplyr::mutate(key = identifier) %>%
+  tidyr::pivot_wider(id_cols = key, names_from = id, values_from = hit, values_fill = 0) %>%
+  tibble::column_to_rownames(var = "key") %>%
+  as.matrix()
+
+# Drop peptides with extreme prevalence (>=5 and <= N-5)
+cs <- colSums(hit_unfiltered_matrix)
+keep <- cs >= 5 & cs <= (nrow(hit_unfiltered_matrix) - 5)
+hit_unfiltered_matrix <- hit_unfiltered_matrix[, keep, drop = FALSE]
+rm(cs, keep)
+
+# Jaccard UMAP for uwot (workaround for metric limitations) 
+# Build exact kNN from a distance matrix (avoids Annoy 'precomputed' issue)
+knn_from_dist <- function(D, k) {
+  n <- nrow(D)
+  k <- min(k, n - 1)
+
+  idx <- t(vapply(seq_len(n), function(i) {
+    ord <- order(D[i, ], na.last = NA)
+    ord <- ord[ord != i]        # drop self
+    ord[seq_len(k)]
+  }, integer(k)))
+
+  dist <- t(vapply(seq_len(n), function(i) {
+    D[i, idx[i, ]]
+  }, numeric(k)))
+
+  list(idx = idx, dist = dist)
+}
+
+# Compute Jaccard distances once
+D_jacc <- as.matrix(vegan::vegdist(hit_unfiltered_matrix, method = "jaccard", binary = TRUE))
+storage.mode(D_jacc) <- "double"
+
+# Precompute neighbors for the desired n_neighbors
+n_neighbors <- 15
+nn_jacc <- knn_from_dist(D_jacc, k = n_neighbors)
+
+# Run uwot using the precomputed neighbor graph
+set.seed(10)
+hit_unfiltered_umap_layout <- uwot::umap(
+  X = hit_unfiltered_matrix,
+  n_neighbors = n_neighbors,
+  n_components = 2,
+  nn_method = nn_jacc,   # <- key workaround
+  n_epochs = 200,
+  init = "spectral",
+  min_dist = 0.1,
+  verbose = FALSE
+)
+
+# Format for plotting
+hit_unfiltered_umap_dt <- as.data.frame(hit_unfiltered_umap_layout) %>%
+  tibble::rownames_to_column(var = "key") %>%
+  dplyr::left_join(sample_meta, by = "key")
+
+Fig2A <- ggplot(
+  hit_unfiltered_umap_dt,
+  aes(
+    x = V1, y = V2,
+    color = factor(
+      interval_label_updated,
+      levels = c(
+        "birth (25)", "3mo (22)", "6mo (23)", "1yr (25)",
+        "1.5yr (22)", "2yr (20)", "3yr (23)", "Adult (559)"
+      )
+    )
+  )
+) +
+  geom_point(size = 1.5, alpha = 0.5) +
+  stat_ellipse(level = 0.95, linetype = "longdash", type = "t") +
+  scale_color_manual(name = "Age group", values = pal1[c(3,4,5,7,8,9,1,10)]) +
+  theme_bw() +
+  theme(
+    text = element_text(family = "Helvetica", color = "black"),
+    strip.background = element_blank(),
+    axis.line = element_blank(),
+    axis.title = element_blank(),
+    axis.text = element_blank(),
+    axis.ticks = element_blank(),
+    panel.grid = element_blank(),
+    legend.title = element_text(size = 7),
+    legend.text = element_text(size = 7)
+  )
+
+Fig2A
+
+rm(hit_unfiltered_umap_layout, hit_unfiltered_umap_dt, D_jacc, nn_jacc)
+```
+
+
+# UMAP sensitivity analysis
+```{r,fig.height = 3, fig.width = 7}
+# Load umap run data generated in UMAP_sensitivity.R
+umap_runs <- read.csv(file=paste0(intermediate_folder_path,"umap_runs.csv"))
+
+# Visualize
+Fig_S2_A <- ggplot(umap_runs, aes(V1, V2, color = factor(interval_label,levels = c("birth", "3mo", "6mo", "1yr","1.5yr", "2yr", "3yr","Adult")))) +
+  facet_grid(min_dist ~ n_neighbors + metric) +
+  theme_bw() +
+  geom_point(size = 0.1,alpha=0.1) + 
+  stat_ellipse(level = 0.95, linetype = "longdash")  + 
+  scale_color_manual(name = "Age group", values = pal1[c(3,4,5,7,8,9,1,10)], guide = guide_legend(nrow=1)) +
+  theme(text=element_text(family = "Helvetica",color = "black"),
+        strip.background = element_blank(),
+        axis.line = element_blank(), 
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),panel.grid = element_blank(),
+        legend.title = element_text(size=7),
+        legend.text = element_text(size=7),
+        strip.text = element_text(size=7),
+        axis.title.x.top = element_text(size=7),
+        axis.title.y.right = element_text(size=7),
+        legend.position = "bottom") +
+        xlab("n neighbors") +
+        scale_y_continuous(position = "right") +
+        scale_x_continuous(position = "top") +
+        ylab("Minimum distance")
+Fig_S2_A
+```
+# Quantitative analysis of UMAP parameters
+```{r}
+# silhouette score (global and by group) for every run
+sil_summary <- umap_runs %>%
+  group_by(n_neighbors, min_dist, metric, seed) %>%
+  group_modify(~{
+    d   <- dist(.x[, c("V1","V2")])
+    grp <- factor(.x$interval_label)  
+    si  <- cluster::silhouette(as.integer(grp), d)
+
+    tibble(
+      mean_sil = mean(si[, "sil_width"], na.rm = TRUE),
+      n        = nrow(.x)
+    )
+  }) %>%
+  ungroup()
+
+# Per-group silhouettes 
+sil_by_group <- umap_runs %>%
+  group_by(n_neighbors, min_dist, metric, seed) %>%
+  group_modify(~{
+    d  <- dist(.x[, c("V1","V2")])
+    grp <- factor(.x$interval_label) 
+    si <- cluster::silhouette(as.integer(grp), d)
+    s  <- as.data.frame(si)
+    s$interval_label <- .x$interval_label
+    s %>% group_by(interval_label) %>%
+      summarise(group_sil = mean(sil_width), .groups = "drop")
+  }) %>%
+  ungroup()
+
+# Summaries you can report (median across seeds)
+sil_overview <- sil_summary %>%
+  group_by(n_neighbors, min_dist, metric) %>%
+  summarise(
+    median_sil = median(mean_sil),
+    IQR_sil    = IQR(mean_sil),
+    .groups = "drop"
+  )
+
+#Procrustes stability across seeds (same parameters)
+# Compare each seed to the smallest seed value as the "baseline" for a given parameter triple
+procrustes_stability <- umap_runs %>%
+  group_by(n_neighbors, min_dist, metric) %>%
+  group_modify(~{
+    g <- .x
+    base_seed <- min(g$seed)
+    base <- g %>% filter(seed == base_seed) %>% arrange(key)
+    others <- g %>% filter(seed != base_seed)
+    if (nrow(others) == 0) return(tibble(seed = integer(), t0 = numeric()))
+    others %>%
+      group_by(seed) %>%
+      group_modify(~{
+        h <- .x %>% arrange(key)
+        # Procrustes test (no permutations): t0 is a correlation-like similarity [0,1]
+        t0 <- vegan::protest(base[, c("V1","V2")], h[, c("V1","V2")], permutations = 0)$t0
+        tibble(t0 = t0)
+      }) %>%
+      ungroup()
+  }) %>%
+  ungroup()
+
+procrustes_overview <- procrustes_stability %>%
+  group_by(n_neighbors, min_dist, metric) %>%
+  summarise(
+    median_t0 = median(t0),
+    IQR_t0    = IQR(t0),
+    .groups = "drop"
+  )
+```
+
+# UMAP variations and Alternative analysis
+
+# Fig S2B make UMAP using VirScores instead
+```{r}
+# Create long DF
+adult_child_virscores<-AVARS_virscores %>% filter(identifier %in% IgG_Data$identifier) %>% left_join(IgG_Data %>% select(c(identifier,donor,time_interval,Age_Years, age_group, interval_label))) %>% mutate(age_group=ifelse(age_group==">1yr","1-3yr",age_group))%>% bind_rows(AVARS_virscores %>% filter(identifier %in% combined_metadata_dist$identifier[combined_metadata_dist$adult_cross==TRUE])%>% left_join(combined_metadata_dist %>% mutate(time_interval=40,age_group="adult",interval_label="Adult")%>% select(c(identifier,donor,time_interval,Age_Years, age_group, interval_label))))
+
+# Add sample size to label
+temp <- adult_child_virscores %>%
+  dplyr::select(identifier, interval_label) %>%
+  dplyr::distinct() %>%
+  dplyr::group_by(interval_label) %>%
+  dplyr::summarise(n_in_group = dplyr::n(), .groups = "drop") %>%
+  dplyr::mutate(interval_label_updated = paste0(interval_label, " (", n_in_group, ")"))
+
+adult_child_virscores <- adult_child_virscores %>%
+  dplyr::left_join(temp %>% dplyr::select(-n_in_group), by = "interval_label")
+rm(temp)
+
+# Sample metadata (One row per identfier)
+sample_meta <- adult_child_virscores %>% 
+  dplyr::group_by(donor, identifier, Age_Years, time_interval, interval_label, interval_label_updated) %>% 
+  dplyr::summarise(sum_virscore = sum(VirScore), .groups = "drop") %>%  
+  dplyr::mutate(key = identifier)
+
+# Build species-level matrix (rows = identifier)
+vir_unfiltered_matrix <- adult_child_virscores %>%
+  dplyr::mutate(key = identifier) %>% 
+  tidyr::pivot_wider(id_cols = key, names_from = species, values_from = VirScore, values_fill = 0) %>% 
+  tibble::column_to_rownames(var = "key") %>% 
+  as.matrix()
+
+# Drop uninformative columns (zero variance)
+keep <- apply(vir_unfiltered_matrix, 2, sd, na.rm = TRUE) > 0
+vir_unfiltered_matrix <- vir_unfiltered_matrix[, keep, drop = FALSE]
+rm(keep)
+
+# Drop very rare species (present in <5 samples)
+prev <- colSums(vir_unfiltered_matrix != 0)
+keep <- prev >= 5
+vir_unfiltered_matrix <- vir_unfiltered_matrix[, keep, drop = FALSE]
+rm(prev, keep)
+
+# Row-normalize to emphasize profile composition (recommended with cosine)
+rs <- rowSums(vir_unfiltered_matrix)
+vir_unfiltered_matrix <- sweep(vir_unfiltered_matrix, 1, rs, "/")
+vir_unfiltered_matrix[is.na(vir_unfiltered_matrix)] <- 0
+
+# UMAP with uwot (cosine)
+set.seed(1)
+vir_unfiltered_layout <- uwot::umap(
+  vir_unfiltered_matrix,
+  n_neighbors = 15,
+  n_components = 2,
+  metric = "cosine",
+  n_epochs = 200,
+  init = "spectral",
+  min_dist = 0.1,
+  verbose = FALSE
+)
+
+# Format the UMAP layout for plotting
+vir_unfiltered_umap_dt <- as.data.frame(vir_unfiltered_layout) %>%
+  tibble::rownames_to_column(var = "key") %>%
+  dplyr::left_join(sample_meta, by = "key")
+
+Fig_S2_B <- ggplot(
+  vir_unfiltered_umap_dt,
+  aes(
+    x = V1, y = V2,
+    color = factor(
+      interval_label_updated,
+      levels = c(
+        "birth (25)", "3mo (22)", "6mo (23)", "1yr (25)",
+        "1.5yr (22)", "2yr (20)", "3yr (23)", "Adult (559)"
+      )
+    )
+  )
+) +
+  geom_point(size = 0.5, alpha = 0.7) +
+  stat_ellipse(level = 0.95, linetype = "longdash", type = "t") +
+  scale_color_manual(name = "Age group", values = pal1[c(3,4,5,7,8,9,1,10)], guide = guide_legend(nrow = 2)) +
+  theme_bw() +
+  theme(
+    text = element_text(family = "Helvetica", color = "black"),
+    strip.background = element_blank(),
+    axis.line = element_blank(),
+    axis.title = element_text(size = 7),
+    axis.text = element_blank(),
+    axis.ticks = element_blank(),
+    panel.grid = element_blank(),
+    legend.title = element_text(size = 7),
+    legend.text = element_text(size = 7),
+    legend.position = "none"
+  ) +
+  labs(x = "V1", y = "V2", color = "Age group")
+
+Fig_S2_B
+
+rm(vir_unfiltered_layout, vir_unfiltered_umap_dt)
+
+```
+
+
+
+
+```{r}
+# Class-imbalance sensitivity: downsample each age group to the smallest group
+set.seed(5)
+size_per_group <- min(table(sample_meta$interval_label))
+
+balanced_keys <- sample_meta %>%
+  dplyr::group_by(interval_label) %>%
+  dplyr::slice_sample(n = size_per_group) %>%
+  dplyr::pull(key)
+
+X_bal <- hit_unfiltered_matrix[balanced_keys, , drop = FALSE]
+smeta_bal <- sample_meta %>% dplyr::filter(key %in% balanced_keys)
+
+# Helper: build exact kNN from a distance matrix (Jaccard workaround for uwot)
+knn_from_dist <- function(D, k) {
+  n <- nrow(D)
+  k <- min(k, n - 1)
+
+  idx <- t(vapply(seq_len(n), function(i) {
+    ord <- order(D[i, ], na.last = NA)
+    ord <- ord[ord != i]
+    ord[seq_len(k)]
+  }, integer(k)))
+
+  dist <- t(vapply(seq_len(n), function(i) {
+    D[i, idx[i, ]]
+  }, numeric(k)))
+
+  list(idx = idx, dist = dist)
+}
+
+# Run one representative UMAP on the balanced set (consistent with main fig: uwot + Jaccard neighbors)
+set.seed(1)
+D_jacc_bal <- as.matrix(vegan::vegdist(X_bal, method = "jaccard", binary = TRUE))
+storage.mode(D_jacc_bal) <- "double"
+nn_jacc_bal <- knn_from_dist(D_jacc_bal, k = 15)
+
+umap_bal_layout <- uwot::umap(
+  X = X_bal,
+  n_neighbors = 15,
+  n_components = 2,
+  nn_method = nn_jacc_bal,   # <- Jaccard-based neighbors
+  n_epochs = 200,
+  init = "spectral",
+  min_dist = 0.1,
+  verbose = FALSE
+)
+
+umap_bal <- as.data.frame(umap_bal_layout) %>%
+  tibble::rownames_to_column(var = "key") %>%
+  dplyr::left_join(smeta_bal %>% dplyr::select(key, interval_label), by = "key")
+
+Fig_S2_C <- ggplot(
+  umap_bal,
+  aes(
+    V1, V2,
+    color = factor(interval_label, levels = c("birth", "3mo", "6mo", "1yr","1.5yr", "2yr", "3yr","Adult"))
+  )
+) +
+  geom_point(size = 0.5, alpha = 0.7) +
+  stat_ellipse(level = 0.95, linetype = "longdash", type = "t") +
+  scale_color_manual(name = "Age group", values = pal1[c(3,4,5,7,8,9,1,10)], guide = guide_legend(ncol = 2)) +
+  theme_bw() +
+  theme(
+    text = element_text(family = "Helvetica", color = "black"),
+    strip.background = element_blank(),
+    axis.line = element_blank(),
+    axis.text = element_blank(),
+    axis.ticks = element_blank(),
+    panel.grid = element_blank(),
+    legend.title = element_text(size = 7),
+    legend.text = element_text(size = 7),
+    strip.text = element_text(size = 7),
+    axis.title.x = element_text(size = 7),
+    axis.title.y = element_text(size = 7),
+    legend.position = "bottom"
+  ) +
+  labs(x = "V1", y = "V2", color = "Age group")
+
+Fig_S2_C
+
+rm(D_jacc_bal, nn_jacc_bal, umap_bal_layout)
+```
+# PERMANOVA on Jaccard distances with pemutations stratified by donor. Data frames generated in "High_Dimensional_Validation.R"
+```{r}
+# Align sample order
+sample_meta <- sample_meta %>% slice(match(rownames(hit_unfiltered_matrix), key))
+stopifnot(all(sample_meta$key == rownames(hit_unfiltered_matrix)))
+
+D_jacc <- read.csv(file=paste0(intermediate_folder_path,"Jaccard_Distance_Matrix.csv"))
+adon_age <- read.csv(paste0(intermediate_folder_path,"PERMANOVA_donor_stratified.csv"))
+adon_age # First row of output is effect of interval_label, second is residual, and third is total
+
+# Dispersion (are groups just more/less spread out?)
+load(file=paste0(intermediate_folder_path,"betadisper.rdata"))
+anova(bd)            # overall differences in dispersion
+permutest(bd, permutations = 999)
+TukeyHSD(bd)
+```
+
+# Fig S2D
+```{r}
+# Label-permutation null (permute age labels, keep distances fixed)
+set.seed(10)
+n_perm <- 500
+perm_R2 <- read.csv(paste0(intermediate_folder_path,"label_permutation_null_R2.csv"))
+obs_R2 <- adon_age$R2[1]
+perm_p <- mean(perm_R2 >= obs_R2)
+perm_p
+
+Fig_S2_D <- ggplot(perm_R2) + geom_histogram(aes(x=x),bins = 500,fill=pal1[1])  +geom_vline(data=NULL,aes(xintercept = obs_R2),linetype="dotted") + 
+  theme_bw() +
+  labs(x=expression(paste("Effect size (", R^{2},")"))) +
+  theme(text=element_text(family = "Helvetica",color = "black"),
+        strip.background = element_blank(),
+        axis.line = element_blank(), 
+        axis.text = element_text(size=7),
+        panel.grid = element_blank(),
+        axis.title.x = element_text(size=7),
+        axis.title.y = element_text(size=7))
+
+Fig_S2_D
+```
+
+# Reviewer requested "Is there evidence of kids aged 10-15 gaining profiles similar to adults? Does the PCA plot from Fig 2 look different once you include older children? When do kids focus on the common epitopes seen in adults?"
+```{r}
+# Look at other pediatric cohorts at discrete times
+temp_identifiers <- combined_metadata_dist %>%
+  dplyr::filter(ped_long_2 == TRUE) %>%
+  dplyr::mutate(age_rounded = round(Age_Years, 0)) %>%
+  dplyr::filter(Age_Years <= 0.85 | age_rounded %in% c(5, 8) | Age_Years > 10) %>%
+  dplyr::mutate(age_rounded = ifelse(Age_Years > 10, 14, age_rounded)) %>%
+  dplyr::mutate(age_rounded = ifelse(Age_Years <= 0.85, 0.5, age_rounded)) %>%
+  dplyr::mutate(dist_from_age_round = abs(Age_Years - age_rounded)) %>%
+  dplyr::group_by(donor, age_rounded) %>%
+  dplyr::arrange(dist_from_age_round) %>%
+  dplyr::slice_head(n = 1) %>%
+  dplyr::mutate(interval_label = ifelse(age_rounded == 14, "10-14yrs", paste0(age_rounded, "yr"))) %>%
+  dplyr::mutate(interval_label = ifelse(age_rounded == 0.5, "<1yr", interval_label)) %>%
+  dplyr::ungroup()
+
+# Create long DF
+adult_older_child_longzs <- all_hits_combined %>%
+  dplyr::select(c(id, all_of(temp_identifiers$identifier))) %>%
+  tidyr::pivot_longer(-id, names_to = "identifier", values_to = "hit") %>%
+  dplyr::left_join(temp_identifiers %>% dplyr::select(c(identifier, donor, Age_Years, interval_label)), by = "identifier") %>%
+  dplyr::bind_rows(
+    subset_frame_fxn(all_hits_combined, combined_metadata_dist, "adult_cross") %>%
+      tidyr::pivot_longer(-id, names_to = "identifier", values_to = "hit") %>%
+      dplyr::left_join(
+        combined_metadata_dist %>%
+          dplyr::mutate(interval_label = "Adult") %>%
+          dplyr::select(c(identifier, donor, Age_Years, interval_label)),
+        by = "identifier"
+      )
+  )
+
+# Add sample size to label (clean count)
+temp <- adult_older_child_longzs %>%
+  dplyr::select(identifier, interval_label) %>%
+  dplyr::distinct() %>%
+  dplyr::group_by(interval_label) %>%
+  dplyr::summarise(n_in_group = dplyr::n(), .groups = "drop") %>%
+  dplyr::mutate(interval_label_updated = paste0(interval_label, " (", n_in_group, ")"))
+
+adult_older_child_longzs <- adult_older_child_longzs %>%
+  dplyr::left_join(temp %>% dplyr::select(-n_in_group), by = "interval_label")
+rm(temp)
+
+# Sample metadata 
+sample_meta <- adult_older_child_longzs %>%
+  dplyr::group_by(donor, identifier, Age_Years, interval_label, interval_label_updated) %>%
+  dplyr::summarise(sum_hit = sum(hit), .groups = "drop") %>%
+  dplyr::mutate(key = identifier)
+
+# Build sample-by-peptide binary matrix (rows = identifier)
+hit_unfiltered_matrix <- adult_older_child_longzs %>%
+  dplyr::mutate(key = identifier) %>%
+  tidyr::pivot_wider(id_cols = key, names_from = id, values_from = hit, values_fill = 0) %>%
+  tibble::column_to_rownames(var = "key") %>%
+  as.matrix()
+
+# Drop peptides with extreme prevalence (>=5 and <= N-5)
+cs <- colSums(hit_unfiltered_matrix)
+keep <- cs >= 5 & cs <= (nrow(hit_unfiltered_matrix) - 5)
+hit_unfiltered_matrix <- hit_unfiltered_matrix[, keep, drop = FALSE]
+rm(cs, keep)
+
+# Jaccard UMAP via uwot 
+knn_from_dist <- function(D, k) {
+  n <- nrow(D)
+  k <- min(k, n - 1)
+
+  idx <- t(vapply(seq_len(n), function(i) {
+    ord <- order(D[i, ], na.last = NA)
+    ord <- ord[ord != i]
+    ord[seq_len(k)]
+  }, integer(k)))
+
+  dist <- t(vapply(seq_len(n), function(i) {
+    D[i, idx[i, ]]
+  }, numeric(k)))
+
+  list(idx = idx, dist = dist)
+}
+
+set.seed(10)
+D_jacc <- as.matrix(vegan::vegdist(hit_unfiltered_matrix, method = "jaccard", binary = TRUE))
+storage.mode(D_jacc) <- "double"
+nn_jacc <- knn_from_dist(D_jacc, k = 15)
+
+hit_unfiltered_umap_layout <- uwot::umap(
+  X = hit_unfiltered_matrix,
+  n_neighbors = 15,
+  n_components = 2,
+  nn_method = nn_jacc,
+  n_epochs = 200,
+  init = "spectral",
+  min_dist = 0.1,
+  verbose = FALSE
+)
+
+# Format the UMAP layout
+hit_unfiltered_umap_dt <- as.data.frame(hit_unfiltered_umap_layout) %>%
+  tibble::rownames_to_column(var = "key") %>%
+  dplyr::left_join(sample_meta, by = "key")
+
+ggplot(
+  hit_unfiltered_umap_dt,
+  aes(
+    x = V1, y = V2,
+    color = factor(
+      interval_label_updated,
+      levels = c("<1yr (24)", "5yr (19)", "8yr (12)", "10-14yrs (12)", "Adult (559)")
+    )
+  )
+) +
+  geom_point(size = 0.5, alpha = 0.5) +
+  stat_ellipse(level = 0.95, linetype = "longdash", type = "t") +
+  scale_color_manual(name = "Age group", values = c("#198861", "#7A5AC4", "#CC2B8D", "#C66525", pal1[10])) +
+  theme_bw() +
+  theme(
+    text = element_text(family = "Helvetica", color = "black"),
+    strip.background = element_blank(),
+    axis.line = element_blank(),
+    axis.title = element_blank(),
+    axis.text = element_blank(),
+    axis.ticks = element_blank(),
+    panel.grid = element_blank(),
+    legend.title = element_text(size = 7),
+    legend.text = element_text(size = 7)
+  )
+
+rm(adult_older_child_longzs, sample_meta, hit_unfiltered_matrix, hit_unfiltered_umap_layout, hit_unfiltered_umap_dt, D_jacc, nn_jacc)
+```
+
+# Calculate whether breadth is different in children and adults
+# Overall
+```{r}
+# 1) Identify the sample identifiers included in each cross-sectional set
+adult_ids <- subset_frame_fxn(all_zs_combined, combined_metadata_dist, "adult_cross") %>%
+  select(-id) %>%
+  colnames()
+
+ped_ids_all <- subset_frame_fxn(all_zs_combined, combined_metadata_dist, "ped_cross") %>%
+  select(-id) %>%
+  colnames()
+
+ped_ids_25_35 <- combined_metadata_dist %>%
+  filter(identifier %in% ped_ids_all, Age_Years >= 2.5, Age_Years <= 3.5) %>%
+  pull(identifier) %>%
+  unique()
+
+# Keep only identifiers that exist in the hit matrix
+hit_sample_cols <- setdiff(colnames(all_hits_combined), "id")
+adult_ids   <- intersect(adult_ids, hit_sample_cols)
+ped_ids_25_35 <- intersect(ped_ids_25_35, hit_sample_cols)
+
+# Compute total peptides targeted per sample from all_hits_combined
+overall_breadth_df <- all_hits_combined %>%
+  select(id, all_of(c(adult_ids, ped_ids_25_35))) %>%
+  pivot_longer(
+    cols = -id,
+    names_to = "identifier",
+    values_to = "hit"
+  ) %>%
+  mutate(
+    hit = as.numeric(hit) %>% tidyr::replace_na(0)
+  ) %>%
+  group_by(identifier) %>%
+  summarize(
+    Epitopes_Rec = sum(hit > 0, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    age_group = case_when(
+      identifier %in% adult_ids ~ "Adult",
+      identifier %in% ped_ids_25_35 ~ "Child",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(age_group))
+
+# sanity checks (should be ~559 adults and 27 children )
+cat("n_adults =", sum(overall_breadth_df$age_group == "Adult"),
+    "n_children_2.5_3.5 =", sum(overall_breadth_df$age_group == "Child"), "\n")
+
+# Two-sided Wilcoxon rank-sum test
+res_overall <- wilcox.test(
+  Epitopes_Rec ~ age_group,
+  data = overall_breadth_df,
+  alternative = "two.sided",
+  exact = FALSE
+)
+
+res_overall
+cat("W =", unname(res_overall$statistic), "p =", res_overall$p.value, "\n")
+```
+
+# Using VirScores
+# Prepare data for composition (2B)
+```{r}
+# Create data frame for cross sectional data sets that defines exposed v not exposed
+temp_z<-subset_frame_fxn(all_zs_combined,combined_metadata_dist,"adult_cross")
+temp_z<-temp_z %>% left_join(Viral_Annotations %>% select(c(id,public_epitope_2015,species,family)))
+temp_z<-temp_z %>% pivot_longer(-c(id,public_epitope_2015,species,family),names_to = "identifier",values_to = "ZScore")
+# group by person and virus to get exposure variables
+adult_exposure_vars_virscore <- temp_z %>% filter(ZScore>=3.5) %>% mutate(public_epitope_hit=ifelse(public_epitope_2015==TRUE,1,0)) %>% mutate(Z_above_5=ifelse(ZScore>=5,1,0)) %>% group_by(species,family,identifier) %>% summarise(n_public_hits=sum(public_epitope_hit),n_z_above_5=sum(Z_above_5),n_tot_hits=max(row_number()))
+adult_exposure_vars_virscore <- adult_exposure_vars_virscore %>% left_join(AVARS_virscores)
+n_adults<-length(unique(adult_exposure_vars_virscore$identifier)) # 559 adults
+# how many exposed
+temp<-Viral_Annotations %>% group_by(species,family) %>% summarise(n_lib_peptides=max(row_number()))
+adult_exposed_summary_virscore<-adult_exposure_vars_virscore %>% mutate(exposed=ifelse((n_public_hits>=1 & n_z_above_5>=1) & VirScore>=2,1,0)) %>% filter(exposed==1) %>% group_by(species,family)%>% summarise(n_exposed=sum(exposed),avg_pub_hits=mean(n_public_hits),avg_z_over_5=mean(n_z_above_5),mean_hits=mean(n_tot_hits),mean_virscore=mean(VirScore)) %>% mutate(n_partic=n_adults) %>% left_join(temp)
+# breadth of response among exposed
+
+# Ped
+temp_z<-subset_frame_fxn(all_zs_combined,combined_metadata_dist,"ped_cross")
+temp_z<-temp_z %>% left_join(Viral_Annotations %>% select(c(id,public_epitope_2015,species,family)))
+temp_z<-temp_z %>% pivot_longer(-c(id,public_epitope_2015,species,family),names_to = "identifier",values_to = "ZScore")
+# group by person and virus to get exposure variables
+# group by person and virus to get exposure variables
+ped_exposure_vars_virscore <- temp_z %>% filter(ZScore>=3.5) %>% mutate(public_epitope_hit=ifelse(public_epitope_2015==TRUE,1,0)) %>% mutate(Z_above_5=ifelse(ZScore>=5,1,0)) %>% group_by(species,family,identifier) %>% summarise(n_public_hits=sum(public_epitope_hit),n_z_above_5=sum(Z_above_5),n_tot_hits=max(row_number()))
+ped_exposure_vars_virscore <- ped_exposure_vars_virscore %>% left_join(AVARS_virscores)
+n_ped<-length(unique(ped_exposure_vars_virscore$identifier)) # 27 peds
+# how many exposed
+temp<-Viral_Annotations %>% group_by(species,family) %>% summarise(n_lib_peptides=max(row_number()))
+ped_exposed_summary_virscore<-ped_exposure_vars_virscore %>% mutate(exposed=ifelse((n_public_hits>=1 & n_z_above_5>=1) & VirScore>=2,1,0)) %>% filter(exposed==1) %>% group_by(species,family)%>% summarise(n_exposed=sum(exposed),avg_pub_hits=mean(n_public_hits),avg_z_over_5=mean(n_z_above_5),mean_hits=mean(n_tot_hits),mean_virscore=mean(VirScore)) %>% mutate(n_partic=n_ped) %>% left_join(temp)
+rm(temp,temp_z)
+length(unique(ped_exposure_vars_virscore$identifier))
+length(unique(adult_exposure_vars_virscore$identifier))
+```
+
+```{r}
+exposure_vars_combined_virscore<-bind_rows(ped_exposure_vars_virscore,adult_exposure_vars_virscore) %>% mutate(exposed=ifelse((n_public_hits>=1 & n_z_above_5>=1) & VirScore>=2,1,0)) %>% filter(exposed==1) %>% left_join(combined_metadata_dist %>% select(c(identifier,age_group,Age_Years,Sex)))
+exposure_vars_combined_virscore
+```
+
+# Average proportions in children and adults
+```{r,fig.width=11,fig.height=6}
+family_prop<- bind_rows(family_breakdown_prop_fn(subset_frame_fxn(all_hits_combined,combined_metadata_dist,"adult_cross"),Viral_Annotations) %>% left_join(combined_metadata_dist %>% select(c(identifier,age_group,Age_Years))), family_breakdown_prop_fn(subset_frame_fxn(all_hits_combined,combined_metadata_dist,"ped_cross"),Viral_Annotations) %>% left_join(combined_metadata_dist %>% select(c(identifier,age_group,Age_Years))))
+family_prop<-family_prop %>% select(-tot_hits) %>% pivot_longer(-c(identifier,Age_Years,age_group),names_to = "family_label",values_to = "prop_of_rep")
+
+# test for normality for each virus and age group
+prop_normality_results<-tidyr::crossing("family_label"=unique(family_prop$family_label),"age_group"=unique(exposure_vars_combined_virscore$age_group))
+prop_normality_results$shapirowilk_p=100
+for (i in seq_along(prop_normality_results$age_group)) {
+  tempdat<-family_prop %>%filter(age_group==prop_normality_results$age_group[i],family_label==prop_normality_results$family_label[i])
+  prop_normality_results$shapirowilk_p[i] <-shapiro.test(tempdat$prop_of_rep)[[2]]
+}
+prop_normality_results %>% filter(shapirowilk_p<=0.05)
+# none of the adult values are normal; use wilcox
+wilcox_props<-data.frame("family_label"=unique(family_prop$family_label))
+for (i in seq_along(wilcox_props$family_label)) {
+  wilcox_props$wilk_p[i]<-wilcox.test(prop_of_rep~age_group,data=family_prop %>% filter(family_label==wilcox_props$family_label[i]))[[3]]
+}
+
+wilcox_props$adjust.wilcox_p=p.adjust(wilcox_props$wilk_p, method="BH")
+wilcox_props %>% filter(adjust.wilcox_p<0.05)
+wilcox_props<-wilcox_props%>% mutate(signif=ifelse(adjust.wilcox_p<0.05,"*",""))%>% mutate(signif=ifelse(adjust.wilcox_p<0.01,"**",signif))%>% mutate(signif=ifelse(adjust.wilcox_p<0.001,"***",signif))
+
+family_prop<-family_prop %>% left_join(wilcox_props %>% select(c(family_label,signif)))%>% mutate(family_label_2=paste0(family_label,signif))
+family_prop
+```
+
+```{r}
+exposure_normality_results_virscore<-tidyr::crossing("species"=unique(exposure_vars_combined_virscore$species),"age_group"=unique(exposure_vars_combined_virscore$age_group))
+exposure_normality_results_virscore$shapirowilkp=100
+exposure_normality_results_virscore$n_exposed=100
+for (i in seq_along(exposure_normality_results_virscore$age_group)) {
+  tempdat<-exposure_vars_combined_virscore %>%filter(age_group==exposure_normality_results_virscore$age_group[i],species==exposure_normality_results_virscore$species[i])
+  exposure_normality_results_virscore$n_exposed[i]=nrow(tempdat)
+  if(nrow(tempdat)<3){
+    exposure_normality_results_virscore$shapirowilkp[i]=NA
+  } else {
+    exposure_normality_results_virscore$shapirowilkp[i] <-shapiro.test(tempdat$VirScore)[[2]]
+  }
+}
+head(exposure_normality_results_virscore)
+exposure_normality_results_virscore %>% filter(shapirowilkp>0.05)
+rm(tempdat)
+# some pediatric responses are normally distributed. Few adult are so use wilcoxon rank sum test
+
+
+```
+
+# Identify viruses with at least 5 exposures per group and perform  wilcoxon test
+```{r}
+temp_viruses<-exposure_normality_results_virscore %>% filter(n_exposed>=5) %>% group_by(species) %>% summarise(tempn=max(row_number())) %>% filter(tempn==2) %>% select(species) %>% unlist() %>% unname()
+M_W_Ep_test_virscore<-data.frame("species"=c(temp_viruses),"wilcox_p"=100)
+for (i in seq_along(M_W_Ep_test_virscore$species)) {
+  tempdat<-exposure_vars_combined_virscore %>%filter(species==M_W_Ep_test_virscore$species[i])
+  M_W_Ep_test_virscore$wilcox_p[i] <-wilcox.test(VirScore~age_group,data=tempdat)[[3]]
+}
+M_W_Ep_test_virscore$adjust.wilcox_p=p.adjust(M_W_Ep_test_virscore$wilcox_p, method="BH")
+M_W_Ep_test_virscore %>% filter(adjust.wilcox_p>0.05)
+M_W_Ep_test_virscore%>% filter(adjust.wilcox_p<=0.05)
+
+```
+
+```{r}
+#arrange by difference
+temp_ord<-M_W_Ep_test_virscore %>% filter(adjust.wilcox_p<0.05) %>% left_join(exposure_vars_combined_virscore) %>% group_by(species,wilcox_p,adjust.wilcox_p,family,age_group) %>% summarise(mean_virscore=mean(VirScore)) %>% pivot_wider(id_cols = c(species,wilcox_p,adjust.wilcox_p,family),names_from = age_group,values_from = mean_virscore,names_prefix = "mean_virscore_") %>% mutate(age_dif=mean_virscore_Adult-mean_virscore_Pediatric) %>% arrange(age_dif) %>% select(c(species,age_dif))
+plot_mean_species<-M_W_Ep_test_virscore %>% filter(adjust.wilcox_p<0.05) %>% left_join(exposure_vars_combined_virscore) %>% group_by(species,wilcox_p,adjust.wilcox_p,family,age_group) %>% summarise(mean_virscore=mean(VirScore),sd_virscore=sd(VirScore),n_in_group=max(row_number())) %>% mutate(sem=sd_virscore/sqrt(n_in_group),t_crit_value=qt(.025,n_in_group-1)*(-1))
+
+# Output sample sizes for figure 2c legend
+fig2c_n_for_legend <- plot_mean_species %>%
+  dplyr::select(species, age_group, n_in_group) %>%
+  tidyr::pivot_wider(
+    names_from = age_group,
+    values_from = n_in_group
+  ) %>%
+  dplyr::mutate(
+    legend_text = paste0(species, ", adult n = ", Adult, ", pediatric n = ", Pediatric)
+  ) %>%
+  dplyr::arrange(factor(species, levels = temp_ord$species))
+
+cat(paste(fig2c_n_for_legend$legend_text, collapse = "; "))
+```
+
+
+
+
+
+```{r,fig.width=7}
+Fig2B<-ggplot(family_prop)+geom_density(alpha=0.6,aes(x=prop_of_rep*100,y=..scaled..,fill=age_group,color=age_group))+facet_wrap(~factor(family_label_2,levels=c("Herpesviridae***", "Orthomyxoviridae**", "Pneumoviridae**","Coronaviridae*","Paramyxoviridae**", "Picornaviridae**","Adenoviridae**", "Other***")),nrow=2)+scale_fill_manual(name="",values = pal1[c(10,6)])+scale_color_manual(name="",values = pal1[c(10,6)])+theme_minimal()+theme(text = element_text(family = "Helvetica", size=7),panel.grid = element_blank(),legend.text  = element_text(size=7),panel.background = element_blank(),panel.border = element_rect(fill=NA,colour = "black"),strip.text.x = element_text(size=7),axis.text = element_text(size=7),axis.title = element_text(size=7))+ylab("Scaled density")+xlab("Percent of antiviral repertoire")
+Fig2B
+```
+
+```{r}
+Fig2C<-ggplot(plot_mean_species)+geom_pointrange(alpha=0.6,position=ggstance::position_dodgev(height=0.3),pch=20, aes(x=mean_virscore,y=factor(species,levels=c(temp_ord$species)),xmin=mean_virscore-t_crit_value*sem,xmax=mean_virscore+t_crit_value*sem,color=age_group))+scale_color_manual(name="Age group",values = pal1[c(10,6)])+theme_minimal()+theme(text=element_text(family="Helvetica"),axis.title.x = element_text(size=7),axis.text=element_text(size=7),legend.position = "none",panel.grid.major.x = element_blank(),panel.grid.minor.x = element_blank(),axis.title.y = element_blank(),plot.margin=unit(c(1,0,0,0), 'cm'))+xlab("Mean Virscore")
+Fig2C
+```
+
+```{r,fig.height=7,fig.width=6}
+ggarrange(ggarrange(ggplot(NULL)+theme_void(), Fig2A, ggplot(NULL)+theme_void(), widths = c(0.4,8,0.4),nrow = 1), Fig2B,Fig2C+theme(plot.margin = unit(c(0, 0.5, 0.5, 0.5), "cm")),labels=c("a","b","c"),heights=c(1.75,2,2),ncol=1,font.label = list(family="Helvetica",size=8))
+ggsave(file=paste0(folder_path_save,"/AVARS_Figure_2_Final.pdf"))
+dev.off()
+```
+# Does Panel C look similar with downsampling
+```{r}
+temp_size<-length(combined_metadata_dist$identifier[combined_metadata_dist$ped_cross==TRUE]) # downsample adults to the number of pediatric donors
+set.seed(5) 
+adults_downsampled <- combined_metadata_dist %>% filter(adult_cross==TRUE) %>% sample_n(temp_size) %>% select(identifier) %>% unlist() %>% unname()
+
+
+family_prop_downsampled <- bind_rows(family_breakdown_prop_fn(all_hits_combined %>% select(c(id,all_of(adults_downsampled))),Viral_Annotations) %>% left_join(combined_metadata_dist %>% select(c(identifier,age_group,Age_Years))), family_breakdown_prop_fn(subset_frame_fxn(all_hits_combined,combined_metadata_dist,"ped_cross"),Viral_Annotations) %>% left_join(combined_metadata_dist %>% select(c(identifier,age_group,Age_Years))))
+family_prop_downsampled<-family_prop_downsampled %>% select(-tot_hits) %>% pivot_longer(-c(identifier,Age_Years,age_group),names_to = "family_label",values_to = "prop_of_rep")
+
+# test for normality for each virus and age group
+prop_normality_results_downsampled<-tidyr::crossing("family_label"=unique(family_prop_downsampled$family_label),"age_group"=unique(exposure_vars_combined_virscore$age_group))
+prop_normality_results_downsampled$shapirowilk_p=100
+for (i in seq_along(prop_normality_results_downsampled$age_group)) {
+  tempdat<-family_prop_downsampled %>%filter(age_group==prop_normality_results_downsampled$age_group[i],family_label==prop_normality_results_downsampled$family_label[i])
+  prop_normality_results_downsampled$shapirowilk_p[i] <-shapiro.test(tempdat$prop_of_rep)[[2]]
+}
+prop_normality_results_downsampled %>% filter(shapirowilk_p<=0.05)
+# Not normal; use wilcox
+wilcox_props_downsampled<-data.frame("family_label"=unique(family_prop_downsampled$family_label))
+for (i in seq_along(wilcox_props_downsampled$family_label)) {
+  wilcox_props_downsampled$wilk_p[i]<-wilcox.test(prop_of_rep~age_group,data=family_prop_downsampled %>% filter(family_label==wilcox_props_downsampled$family_label[i]))[[3]]
+}
+
+wilcox_props_downsampled$adjust.wilcox_p=p.adjust(wilcox_props_downsampled$wilk_p, method="BH")
+wilcox_props_downsampled %>% filter(adjust.wilcox_p<0.05)
+wilcox_props_downsampled<-wilcox_props_downsampled%>% mutate(signif=ifelse(wilk_p<0.05,"*",""))%>% mutate(signif=ifelse(wilk_p<0.01,"**",signif))%>% mutate(signif=ifelse(wilk_p<0.001,"***",signif))
+
+family_prop_downsampled<-family_prop_downsampled %>% left_join(wilcox_props_downsampled %>% select(c(family_label,signif)))%>% mutate(family_label_2=paste0(family_label,signif))
+
+family_prop_downsampled
+
+Fig_S2_E <- ggplot(family_prop_downsampled)+geom_density(alpha=0.6,aes(x=prop_of_rep*100,y=..scaled..,fill=age_group,color=age_group))+facet_wrap(~factor(family_label_2,levels=c("Herpesviridae***", "Orthomyxoviridae*", "Pneumoviridae","Coronaviridae","Paramyxoviridae*", "Picornaviridae","Adenoviridae", "Other***")),nrow=2)+scale_fill_manual(name="",values = pal1[c(10,6)])+scale_color_manual(name="",values = pal1[c(10,6)])+theme_minimal()+theme(text = element_text(family = "Helvetica", size=7),panel.grid = element_blank(),legend.text  = element_text(size=7),panel.background = element_blank(),panel.border = element_rect(fill=NA,colour = "black"),strip.text.x = element_text(size=7),axis.text = element_text(size=7),axis.title = element_text(size=7))+ylab("Scaled density")+xlab("Percent of antiviral repertoire")
+Fig_S2_E
+```
+# Patterns are similar with downsampling; lose some statistical significance
+
+# Do the same for panel D - this becomes Fig S2f
+```{r}
+set.seed(5)
+
+# 1) Species eligible for testing: >=5 per age_group before downsampling
+eligible_species <- exposure_vars_combined_virscore %>%
+  dplyr::count(species, age_group, name = "n") %>%
+  dplyr::filter(n >= 5) %>%
+  dplyr::count(species, name = "n_groups") %>%
+  dplyr::filter(n_groups == 2) %>%
+  dplyr::pull(species)
+
+dat_eligible <- exposure_vars_combined_virscore %>%
+  dplyr::filter(species %in% eligible_species) %>%
+  dplyr::filter(age_group %in% c("Adult", "Pediatric"))
+
+# 2) Downsample within each species to balance Adult/Pediatric
+dat_bal <- dat_eligible %>%
+  dplyr::group_by(species) %>%
+  dplyr::group_modify(~{
+    g <- .x
+    n_min <- min(table(g$age_group))
+    g %>%
+      dplyr::group_by(age_group) %>%
+      dplyr::slice_sample(n = n_min) %>%
+      dplyr::ungroup()
+  }) %>%
+  dplyr::ungroup()
+
+# Store the balanced n used per age group for each species
+species_n_bal <- dat_bal %>%
+  dplyr::count(species, age_group, name = "n_in_group") %>%
+  dplyr::group_by(species) %>%
+  dplyr::summarise(
+    n_balanced = unique(n_in_group)[1],
+    .groups = "drop"
+  )
+
+# 3) Wilcoxon per species on the balanced data + BH correction across species
+mw_bal <- dat_bal %>%
+  dplyr::group_by(species) %>%
+  dplyr::summarise(
+    wilcox_p = wilcox.test(
+      VirScore ~ age_group,
+      data = dplyr::cur_data(),
+      alternative = "two.sided",
+      exact = FALSE
+    )$p.value,
+    .groups = "drop"
+  ) %>%
+  dplyr::mutate(adjust_wilcox_p = p.adjust(wilcox_p, method = "BH"))
+
+sig_species_bal <- mw_bal %>%
+  dplyr::filter(wilcox_p < 0.05) %>%
+  dplyr::pull(species)
+
+# If nothing survives the significance threshold, this will just plot nothing
+dat_bal_sig <- dat_bal %>%
+  dplyr::filter(species %in% sig_species_bal)
+
+# 4) Summaries for plotting: mean +/- t * SEM
+plot_mean_species_bal_sig <- dat_bal_sig %>%
+  dplyr::group_by(species, family, age_group) %>%
+  dplyr::summarise(
+    mean_virscore = mean(VirScore, na.rm = TRUE),
+    sd_virscore   = sd(VirScore, na.rm = TRUE),
+    n_in_group    = dplyr::n(),
+    .groups = "drop"
+  ) %>%
+  dplyr::mutate(
+    sem = sd_virscore / sqrt(n_in_group),
+    t_crit_value = qt(.025, n_in_group - 1) * (-1)
+  ) %>%
+  dplyr::left_join(species_n_bal, by = "species") %>%
+  dplyr::mutate(
+    species_label = paste0(species, " (n = ", n_balanced, ")")
+  )
+
+# 5) Order species by Adult - Pediatric mean difference
+temp_ord_bal_sig <- plot_mean_species_bal_sig %>%
+  dplyr::select(species, species_label, age_group, mean_virscore) %>%
+  tidyr::pivot_wider(names_from = age_group, values_from = mean_virscore) %>%
+  dplyr::mutate(age_dif = Adult - Pediatric) %>%
+  dplyr::arrange(age_dif)
+
+species_label_levels_bal_sig <- temp_ord_bal_sig$species_label
+
+Fig_S2_F <- ggplot(plot_mean_species_bal_sig) +
+  geom_pointrange(
+    alpha = 0.6,
+    position = ggstance::position_dodgev(height = 0.3),
+    pch = 20,
+    aes(
+      x = mean_virscore,
+      y = factor(species_label, levels = species_label_levels_bal_sig),
+      xmin = mean_virscore - t_crit_value * sem,
+      xmax = mean_virscore + t_crit_value * sem,
+      color = age_group
+    )
+  ) +
+  scale_color_manual(name = "Age group", values = pal1[c(10, 6)]) +
+  theme_minimal() +
+  theme(
+    text = element_text(family = "Helvetica", size = 7),
+    axis.title.x = element_text(size = 7),
+    axis.text.y  = element_text(size = 7),
+    legend.position = "none",
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    axis.title.y = element_blank(),
+    plot.margin = unit(c(1, 0, 0, 0), "cm")
+  ) +
+  xlab("Mean VirScore")
+
+Fig_S2_F
+
+```
+
+
+
+
+# Figure S2
+# Sensitivity analysis and alternatives to UMAP
+
+```{r,fig.height=6.75,fig.width=7}
+ggarrange(Fig_S2_A, ggarrange(Fig_S2_B, Fig_S2_C + theme (legend.position = "none"),Fig_S2_D, nrow=1, font.label = list(family="Helvetica",size=8),labels = c("b","c","d")), ggarrange(Fig_S2_E + theme(axis.text = element_text(size=7),legend.position = "top"),Fig_S2_F,font.label = list(family="Helvetica",size=8),labels = c("e","f"),widths = c(2,1.5)), nrow = 3, heights = c(2,1.2,1.5),font.label = list(family="Helvetica",size=8),labels = c("a","",""))
+ggsave(file=paste0(folder_path_save,"Supplemental Figures/AVARS_Figure_S2_Final.pdf"))
+dev.off()
+```
+
+
+# Figure S1
+## Panel A is UMAP generated for specific viral families
+### Data preparation
+```{r}
+# Helper: build exact kNN from a distance matrix (Jaccard workaround for uwot)
+knn_from_dist <- function(D, k) {
+  n <- nrow(D)
+  k <- min(k, n - 1)
+
+  idx <- t(vapply(seq_len(n), function(i) {
+    ord <- order(D[i, ], na.last = NA)
+    ord <- ord[ord != i]        # drop self
+    ord[seq_len(k)]
+  }, integer(k)))
+
+  dist <- t(vapply(seq_len(n), function(i) {
+    D[i, idx[i, ]]
+  }, numeric(k)))
+
+  list(idx = idx, dist = dist)
+}
+
+# Helper: run family-specific UMAP (identifier key + prevalence filter + uwot + Jaccard via nn_method)
+run_family_umap <- function(long_df, family_ids, Viral_Annotations, n_neighbors = 15) {
+
+  # sample_meta (one row per identifier)
+  sample_meta <- long_df %>%
+    dplyr::filter(id %in% family_ids) %>%
+    dplyr::group_by(donor, identifier, Age_Years, time_interval, interval_label, interval_label_updated) %>%
+    dplyr::summarise(sum_hit = sum(hit), .groups = "drop") %>%
+    dplyr::mutate(key = identifier)
+
+  # peptide_meta (kept in case you still use it downstream)
+  peptide_meta <- long_df %>%
+    dplyr::filter(id %in% family_ids) %>%
+    dplyr::left_join(Viral_Annotations %>% dplyr::select(id, family_label, species), by = "id") %>%
+    dplyr::group_by(id, species, family_label) %>%
+    dplyr::summarise(positive_sample = sum(hit), .groups = "drop")
+
+  # build binary matrix (rows = identifier)
+  X <- long_df %>%
+    dplyr::filter(id %in% family_ids) %>%
+    dplyr::mutate(key = identifier) %>%
+    tidyr::pivot_wider(id_cols = key, names_from = id, values_from = hit, values_fill = 0) %>%
+    tibble::column_to_rownames(var = "key") %>%
+    as.matrix()
+
+  # prevalence filter (consistent with Fig 2A)
+  cs <- colSums(X)
+  keep <- cs >= 5 & cs <= (nrow(X) - 5)
+  X <- X[, keep, drop = FALSE]
+  rm(cs, keep)
+
+  # Jaccard distances + kNN
+  D_jacc <- as.matrix(vegan::vegdist(X, method = "jaccard", binary = TRUE))
+  storage.mode(D_jacc) <- "double"
+  nn_jacc <- knn_from_dist(D_jacc, k = n_neighbors)
+
+  # UMAP with uwot using precomputed neighbors
+  set.seed(1)
+  layout <- uwot::umap(
+    X = X,
+    n_neighbors = n_neighbors,
+    n_components = 2,
+    nn_method = nn_jacc,
+    n_epochs = 200,
+    init = "spectral",
+    min_dist = 0.1,
+    verbose = FALSE
+  )
+
+  umap_dt <- as.data.frame(layout) %>%
+    tibble::rownames_to_column(var = "key") %>%
+    dplyr::left_join(sample_meta, by = "key")
+
+  list(
+    umap_dt = umap_dt,
+    sample_meta = sample_meta,
+    peptide_meta = peptide_meta,
+    X = X
+  )
+}
+
+# Define family ID sets
+herpes_ids <- Viral_Annotations$id[Viral_Annotations$family_label == "Herpesviridae"]
+adeno_ids  <- Viral_Annotations$id[Viral_Annotations$family_label == "Adenoviridae"]
+flu_ids    <- Viral_Annotations$id[Viral_Annotations$family_label == "Orthomyxoviridae"]
+picorn_ids <- Viral_Annotations$id[Viral_Annotations$family_label == "Picornaviridae"]
+cov_ids    <- Viral_Annotations$id[Viral_Annotations$family_label == "Coronaviridae"]
+paramyx_ids<- Viral_Annotations$id[Viral_Annotations$family_label == "Paramyxoviridae"]
+
+# Run UMAPs (each returns a list; we keep umap_dt for plotting)
+hit_herpes_umap_dt  <- run_family_umap(adult_child_longzs, herpes_ids, Viral_Annotations)$umap_dt
+hit_adeno_umap_dt   <- run_family_umap(adult_child_longzs, adeno_ids,  Viral_Annotations)$umap_dt
+hit_flu_umap_dt     <- run_family_umap(adult_child_longzs, flu_ids,    Viral_Annotations)$umap_dt
+hit_picorn_umap_dt  <- run_family_umap(adult_child_longzs, picorn_ids, Viral_Annotations)$umap_dt
+hit_cov_umap_dt     <- run_family_umap(adult_child_longzs, cov_ids,    Viral_Annotations)$umap_dt
+hit_paramyx_umap_dt <- run_family_umap(adult_child_longzs, paramyx_ids,Viral_Annotations)$umap_dt
+```
+
+### Make panel
+```{r}
+hit_umap_dt <- dplyr::bind_rows(
+  list(
+    "Herpesvirus"    = hit_herpes_umap_dt,
+    "Adenovirus"     = hit_adeno_umap_dt,
+    "Orthomyxovirus" = hit_flu_umap_dt,
+    "Picornavirus"   = hit_picorn_umap_dt,
+    "Coronavirus"    = hit_cov_umap_dt,
+    "Paramyxovirus"  = hit_paramyx_umap_dt
+  ),
+  .id = "filter"
+) %>%
+  dplyr::mutate(
+    filter = ordered(
+      filter,
+      levels = c("Herpesvirus", "Adenovirus","Orthomyxovirus","Picornavirus","Coronavirus","Paramyxovirus"),
+      labels = c(
+        paste0("Herpesviridae peptides\n(n = ", length(herpes_ids), ")"),
+        paste0("Adenoviridae peptides\n(n = ", length(adeno_ids), ")"),
+        paste0("Orthomyxoviridae peptides\n(n = ", length(flu_ids), ")"),
+        paste0("Picornaviridae peptides\n(n = ", length(picorn_ids), ")"),
+        paste0("Coronaviridae peptides\n(n = ", length(cov_ids), ")"),
+        paste0("Paramyxoviridae peptides\n(n = ", length(paramyx_ids), ")")
+      )
+    )
+  )
+
+Fig_S1_A <- ggplot(
+  hit_umap_dt,
+  aes(
+    x = V1, y = V2,
+    color = factor(
+      interval_label_updated,
+      levels = c(
+        "birth (25)", "3mo (22)", "6mo (23)", "1yr (25)",
+        "1.5yr (22)", "2yr (20)", "3yr (23)", "Adult (559)"
+      )
+    )
+  )
+) +
+  geom_point(size = 1.5, alpha = 0.5) +
+  stat_ellipse(level = 0.95, linetype = "longdash", type = "t") +
+  facet_wrap(facets = vars(filter), nrow = 2, scales = "free") +
+  scale_color_manual(name = "Age group", values = c( pal1[c(3,4,5,7,8,9,1)], "grey65")) +
+  theme_bw(base_size = 8) +
+  theme(
+    strip.background = element_blank(),
+    axis.line = element_blank(),
+    axis.title = element_blank(),
+    axis.text = element_blank(),
+    axis.ticks = element_blank(),
+    panel.grid = element_blank(),
+    text = element_text(family = "Helvetica", colour = "black",size = 7),
+    legend.title = element_text(size = 7),
+    legend.text = element_text(size = 7),
+    legend.position = "top"
+  )
+
+Fig_S1_A
+```
+
+
+## Combine and save
+```{r,fig.width=7,fig.height=4}
+Fig_S1_A
+ggsave(file=paste0(folder_path_save,"/AVARS_Figure_S1_Final.pdf"))
+dev.off()
+```
+
+
+
