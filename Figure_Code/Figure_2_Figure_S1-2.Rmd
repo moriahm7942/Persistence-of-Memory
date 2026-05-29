@@ -1,15 +1,16 @@
 ---
-title: "R Notebook"
+title: "Figure_2_Figure_S1-2"
 output: html_notebook
 ---
 
 ```{r}
-easypackages::libraries(c("readr","readxl","dplyr","tidyr","ggplot2","ggpubr","cowplot","grid","ggplotify","uwot","purrr","vegan","cluster"))
-# insert path to folders
-directory_path <- "" # CHANGE THIS to path to director enclosing code and data sets
+easypackages::libraries(c("readr","readxl","dplyr","tidyr","ggplot2","ggpubr","cowplot","grid","ggplotify","uwot","purrr","vegan","cluster","here"))
+
+# Define paths relative to the root of the cloned GitHub repository
+directory_path <- here::here()
 folder_path <- paste0(directory_path, "/Supplemental Tables/") # folder containing downloaded data sets
 intermediate_folder_path <- paste0(directory_path, "/Intermediate Files Used in Plots/") # path containing intermediate outputs
-folder_path_save <- paste0(directory_path, "/Complete Figures/")# define folder path to save images to
+folder_path_save <- paste0(directory_path, "/Complete Figures/") # define folder path to save images to
 
 # Load Supplemental Data
 combined_metadata_dist <- read_csv(paste0(folder_path,"Data Table S1.csv"))
@@ -29,12 +30,14 @@ subset_frame_fxn<-function(wide_df,sample_metadata,dataset_lab) {
   filtered_df<-wide_df %>% select(c(id,all_of(sample_list)))
   return(filtered_df)
 }
+
 family_breakdown_prop_fn<-function(Hit_frame,peptide_family_labels) {
   peptide_labels <- peptide_family_labels %>% select(c(id,family_label))
   family_breakdown <- Hit_frame %>% left_join(peptide_labels) %>% pivot_longer(-c(id,family_label),names_to = "identifier",values_to = "Hit") %>% filter(Hit==1)%>% group_by(identifier,family_label) %>% summarise(n_hits=sum(Hit)) %>% pivot_wider(id_cols = identifier,names_from = family_label,values_from = n_hits,values_fill = 0) %>% mutate(tot_hits=Other+Herpesviridae+ Picornaviridae+ Orthomyxoviridae+ Pneumoviridae+Adenoviridae+Coronaviridae+Paramyxoviridae) 
   family_breakdown_prop<-family_breakdown %>% mutate(Other=Other/tot_hits,Herpesviridae=Herpesviridae/tot_hits, Picornaviridae=Picornaviridae/tot_hits, Orthomyxoviridae=Orthomyxoviridae/tot_hits, Pneumoviridae=Pneumoviridae/tot_hits, Adenoviridae=Adenoviridae/tot_hits,  Coronaviridae=Coronaviridae/tot_hits, Paramyxoviridae=Paramyxoviridae/tot_hits)
 return(family_breakdown_prop)
 }
+
 pal1<-c("#F87E2E", "#FFEC33", "#1FAA79", "#14C4F8", "#0077C8", "#9870F5", "#D53EE1", "#FF36B0", "#D72638", "#6E6E6E") 
 ```
 
