@@ -14,18 +14,14 @@ easypackages::libraries(c(
 # This assumes the repository has been cloned and this notebook is being run
 # from within the Persistence-of-Memory project.
 directory_path <- here::here()
-folder_path <- file.path(directory_path, "Supplemental Tables")
-folder_path_save <- file.path(directory_path, "Figure_Panels_for_Illustrator")
-
-if (!dir.exists(folder_path_save)) {
-  dir.create(folder_path_save, recursive = TRUE)
-}
+folder_path <- paste0(directory_path, "/Supplemental Tables/") # folder containing downloaded data sets
+folder_path_save <- paste0(directory_path, "/Figure_Panels_for_Illustrator/") # change to desired folder to save image to
 
 # Load data
-combined_metadata_dist <- readr::read_csv(file.path(folder_path, "Data Table S1.csv"))
-all_zs_combined <- readr::read_csv(file.path(folder_path, "Data Table S2.csv"))
-all_hits_combined <- readr::read_csv(file.path(folder_path, "Data Table S3.csv"))
-Viral_Annotations <- readr::read_csv(file.path(folder_path, "Data Table S4.csv"))
+combined_metadata_dist <- read_csv(paste0(folder_path,"Data Table S1.csv"))
+all_zs_combined <- read_csv(paste0(folder_path,"Data Table S2.csv"))
+all_hits_combined <- read_csv(paste0(folder_path,"Data Table S3.csv"))
+Viral_Annotations <- read_csv(paste0(folder_path,"Data Table S4.csv"))
 
 subset_frame_fxn <- function(wide_df, sample_metadata, dataset_lab) {
   sample_list <- sample_metadata$identifier[which(sample_metadata[[dataset_lab]] == TRUE)]
