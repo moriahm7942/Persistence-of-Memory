@@ -1,0 +1,1401 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+easypackages::libraries(c("readr","readxl","dplyr","tidyr","ggplot2","ggpubr","UpSetR","cowplot","grid","ggplotify","patchwork","stringr","igraph","ggraph"))
+
+# insert path to folders
+directory_path <- "" # CHANGE THIS to path to director enclosing code and data sets
+folder_path <- paste0(directory_path, "/Supplemental Tables/") # folder containing downloaded data sets
+intermediate_folder_path <- paste0(directory_path, "/Intermediate Files Used in Plots/") # path containing intermediate outputs
+folder_path_save <- paste0(directory_path, "/Complete Figures/")# define folder path to save images to
+folder_path_code <- paste0(directory_path, "/Functions and General Analysis Code/") # change this to folder containing downloaded functions and code
+
+# Load Supplemental Data
+combined_metadata_dist <- read_csv(paste0(folder_path,"Data Table S1.csv"))
+all_zs_combined <- read_csv(paste0(folder_path,"Data Table S2.csv"))
+all_hits_combined <- read_csv(paste0(folder_path,"Data Table S3.csv"))
+Viral_Annotations <- read_csv(paste0(folder_path,"Data Table S4.csv"))
+IgG_Data <- read_csv(paste0(folder_path,"Data Table S6.csv"))
+Vaccination_Data <- read_csv(paste0(folder_path,"Data Table S7.csv"))
+Birth_Consec_Zs <- read_csv(paste0(intermediate_folder_path,"Birth_Consec_Zs.csv")) # Generated in "Generate Circle Plot Data.R"
+age_at_exposure <- read_csv(paste0(intermediate_folder_path,"circle_plot_data_figure_5.csv")) # Generated in "Generate Circle Plot Data.R"
+virus_key_5D <- read_csv(paste0(intermediate_folder_path,"virus_key_figure_5.csv")) # Generated in "Generate Circle Plot Data.R"
+
+
+# Load custom functions
+source(paste0(folder_path_code,"Immunoprint functions.R"))
+cosine_sim <- function(x, y) {
+  # robust cosine for numeric vectors
+  num <- sum(x * y, na.rm = TRUE)
+  den <- sqrt(sum(x * x, na.rm = TRUE)) * sqrt(sum(y * y, na.rm = TRUE))
+  if (is.na(den) || den == 0) return(NA_real_)
+  num / den
+}
+
+pal1<-c("#F87E2E", "#FFEC33", "#1FAA79", "#14C4F8", "#0077C8", "#9870F5", "#D53EE1", "#FF36B0", "#D72638", "#6E6E6E")
+```
+
+# Limit vaccination data to window sampled
+```{r}
+temp <- combined_metadata_dist %>% filter(donor %in% Vaccination_Data$donor) %>% group_by(donor) %>% summarise(max_age=max(Age_Years),min_age=min(Age_Years)) %>% filter(min_age==0)
+Vaccination_Data <- Vaccination_Data %>% filter(donor %in% temp$donor)%>% left_join(temp) %>% filter(Age_Years<max_age)
+Vaccination_Data
+```
+# Maternal Endogenous Labeling of Vaccine Antigen Responses
+```{r}
+vaccine_ids <- Viral_Annotations %>% filter((species=="Enterovirus C" & grepl("Poliovirus",Organism))|(species %in% c("Rotavirus A","Rotavirus B") & grepl("Human",Organism))|species %in% c("Measles morbillivirus","Rubivirus rubellae")|species %in% c("Influenza A virus","Influenza B virus")) %>% select(id) %>% unlist() %>% unname()
+
+Mat_end_hits<-all_hits_combined %>% filter(id %in% vaccine_ids) %>%  select(c(id,all_of(IgG_Data$identifier))) %>% left_join(Viral_Annotations%>% select(c(id,species,Organism))) %>% pivot_longer(-c(id,species,Organism),names_to = "identifier",values_to = "hit") %>% left_join(IgG_Data %>% select(c(identifier,donor,time_interval,Age_Years, age_group, interval_label))) %>% left_join(all_zs_combined %>% filter(id %in% vaccine_ids) %>% select(c(id,all_of(IgG_Data$identifier))) %>% pivot_longer(-id,names_to = "identifier",values_to = "zscore")) %>% left_join(bound_Z(all_zs_combined %>% filter(id %in% vaccine_ids) %>% select(c(id,all_of(IgG_Data$identifier)))) %>% pivot_longer(-id,names_to = "identifier",values_to = "trunc_zscore"))
+
+# select only individual + id for which there is a hit at birth
+present_at_birth <- filter(Mat_end_hits, Age_Years == 0, hit == 1) %>%
+  mutate(indiv_id_key = paste(donor, id)) %>%
+  select(c(indiv_id_key))
+
+# all possible trajectories
+keep_maternal <- c("maternal_maternal_maternal_maternal", 
+                   "maternal_missing_maternal_maternal")
+
+rm_after_0 <- c("maternal_not maternal_maternal_maternal", 
+                "maternal_not maternal_maternal_not maternal", 
+                "maternal_not maternal_not maternal_maternal",
+                "maternal_not maternal_not maternal_not maternal",
+                "maternal_not maternal_missing_maternal",
+                "maternal_not maternal_missing_not maternal",
+                "maternal_missing_not maternal_maternal",
+                "maternal_missing_not maternal_not maternal")
+
+rm_after_1 <- c("maternal_maternal_not maternal_maternal", 
+                "maternal_maternal_not maternal_not maternal",
+                "maternal_maternal_missing_not maternal",
+                "maternal_maternal_missing_maternal")
+
+rm_after_2 <- c("maternal_maternal_maternal_not maternal", 
+                "maternal_missing_maternal_not maternal")
+
+# label epitopes
+maternal_hits <- Mat_end_hits %>%
+  filter(paste(donor, id) %in% present_at_birth$indiv_id_key, 
+           # select only those epitopes present at birth
+         time_interval <= 1) %>%  # select only timepoints less than 1yr
+  mutate(key = paste(donor, time_interval, id)) %>%
+  group_by(donor, id) %>%
+  arrange(Age_Years) %>%
+  mutate(delta_zscore = c(0, diff(zscore)), 
+           # get difference from timepoint to timepoint to see whether z score is decreasing or increasing
+         maternal = case_when(
+           Age_Years == 0 ~ "maternal",
+           hit == 1 & delta_zscore <= 0 ~ "maternal", 
+           hit == 0 ~ "not maternal",
+           hit == 1 & delta_zscore > 0 ~ "not maternal"
+           # maternal antibodies: enriched at birth and declining afterwards
+         )) %>%  
+  select(-c(Age_Years, zscore, age_group, trunc_zscore, hit, delta_zscore, key, interval_label,identifier)) %>%
+  pivot_wider(names_from = time_interval, values_from = maternal, values_fill = "missing") %>%
+  mutate(trajectory = paste(`0`, `0.25`, `0.5`, `1`, sep = "_"),
+         rm = case_when(
+           trajectory %in% keep_maternal ~ "keep_maternal",
+           trajectory %in% rm_after_0 ~ "rm_after_0",
+           trajectory %in% rm_after_1 ~ "rm_after_1",
+           trajectory %in% rm_after_2 ~ "rm_after_2")) %>%
+  pivot_longer(cols = c(`0`, `0.25`, `0.5`, `1`), names_to = "time_interval", values_to = "maternal") %>%
+  mutate(maternal = case_when(
+    time_interval == 0 ~ "maternal",
+    rm == "keep_maternal" ~ "maternal",
+    rm == "rm_after_0" & time_interval > 0 ~ "not maternal",
+    rm == "rm_after_1" & time_interval > 0.25 ~ "not maternal",
+    rm == "rm_after_1" & time_interval <= 0.25 ~ "maternal",
+    rm == "rm_after_2" & time_interval > 0.5 ~ "not maternal",
+    rm == "rm_after_2" & time_interval <= 0.5 ~ "maternal"),
+    key = paste(donor, time_interval, id))
+                     
+maternal_hits_key <- filter(maternal_hits, maternal == "maternal")$key
+
+hits_by_maternal <- Mat_end_hits %>% 
+  mutate(key = paste(donor, time_interval, id),
+         maternal = ifelse(key %in% maternal_hits_key, "maternal", "endogenous"))
+```
+# Figure 6: MMR vaccination
+## Prepare data
+
+```{r}
+# Identify vaccinated donors and prep data for virus
+temp_donors <- Vaccination_Data %>%
+  filter(species %in% c("Measles morbillivirus","Rubivirus rubellae")) %>%
+  select(donor, cohort, Sex, Age_Years, Age_Months, Pathogen) %>%
+  distinct() %>%
+  group_by(donor) %>%
+  summarise(n_vaccination = n(), .groups="drop") %>%
+  select(donor) %>%
+  distinct() %>%
+  pull(donor) %>%
+  unique()
+
+temp_samples <- combined_metadata_dist %>% filter(donor %in% temp_donors)
+
+# keep only donors with at least 3 sampled timepoints (true sample count)
+temp_donors_initial <- temp_samples %>%
+  distinct(donor, identifier) %>%
+  count(donor, name = "n_samples") %>%
+  filter(n_samples >= 3) %>%
+  pull(donor) %>%
+  unique()
+
+# re-subset samples after filtering donors
+temp_samples <- combined_metadata_dist %>% filter(donor %in% temp_donors_initial)
+
+temp_peptides <- Viral_Annotations %>%
+  filter(species %in% c("Measles morbillivirus","Rubivirus rubellae"))
+
+# Define vax events (using measles as proxy for MMR)
+temp_vaccination <- Vaccination_Data %>%
+  filter(donor %in% temp_donors_initial, species %in% c("Measles morbillivirus")) %>%
+  select(-c(species, Vaccine_Name_English)) %>%
+  distinct() %>%
+  group_by(donor) %>%
+  arrange(Age_Years) %>%
+  mutate(vaccine_dose = as.factor(row_number())) %>%
+  ungroup()
+
+# Process Z-scores and hits
+temp_zs <- all_zs_combined %>%
+  select(c(id, all_of(temp_samples$identifier))) %>%
+  filter(id %in% temp_peptides$id) %>%
+  bound_Z(upper = 15) %>%
+  left_join(Viral_Annotations %>% select(c(id, Entry, `Entry name`, species, `Protein names`, Organism))) %>%
+  pivot_longer(-c(id, Entry, `Entry name`, species, `Protein names`, Organism),
+               names_to = "identifier", values_to = "Z_Bound") %>%
+  mutate(hit = ifelse(Z_Bound >= 3.5, 1, 0)) %>%
+  left_join(temp_samples %>% select(c(identifier, Age_Years, donor)))
+
+#  Adaptive Filtering 
+
+# Get Dose 1 age for windowing
+dose1_age <- temp_vaccination %>%
+  group_by(donor) %>%
+  slice_min(order_by = as.numeric(as.character(vaccine_dose)), n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  transmute(donor, dose1_age = Age_Years)
+
+# Assess windows per donor
+prepost_df <- temp_samples %>%
+  left_join(dose1_age, by = "donor") %>%
+  filter(!is.na(dose1_age)) %>%
+  group_by(donor) %>%
+  summarise(
+    has_pre6  = any(Age_Years < dose1_age & Age_Years >= (dose1_age - 0.5), na.rm = TRUE),
+    has_post6 = any(Age_Years > dose1_age & Age_Years <= (dose1_age + 0.5), na.rm = TRUE),
+    n_samples = n_distinct(identifier),
+    .groups = "drop"
+  )
+
+# Pick donor set based on data density
+donors_pre_and_post <- prepost_df %>% filter(has_pre6 & has_post6) %>% pull(donor)
+donors_pre_or_post  <- prepost_df %>% filter(has_pre6 | has_post6) %>% pull(donor)
+donors_at_least3    <- prepost_df %>% filter(n_samples >= 3) %>% pull(donor)
+
+if (length(donors_pre_and_post) > 0) {
+  selected_donors <- donors_pre_and_post
+} else if (length(donors_pre_or_post) > 0) {
+  selected_donors <- donors_pre_or_post
+} else {
+  selected_donors <- donors_at_least3
+}
+
+# apply final filters to working sets
+temp_donors      <- intersect(temp_donors_initial, selected_donors)
+temp_samples     <- combined_metadata_dist %>% filter(donor %in% temp_donors)
+temp_vaccination <- temp_vaccination %>% filter(donor %in% temp_donors)
+temp_zs          <- temp_zs %>% filter(donor %in% temp_donors)
+
+# Select Key Samples
+
+# Birth sample
+birth <- temp_samples %>%
+  filter(Age_Years == 0) %>%
+  group_by(donor) %>%
+  slice_min(Age_Years, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  mutate(dose = "Birth") %>%
+  select(donor, identifier, Age_Years, dose)
+
+# Pre-vax sample
+pre <- temp_samples %>%
+  left_join(dose1_age, by = "donor") %>%
+  filter(Age_Years < dose1_age) %>%
+  mutate(dist_from_dose1 = abs(Age_Years - dose1_age)) %>%
+  group_by(donor) %>%
+  slice_min(dist_from_dose1, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  filter(Age_Years >= (6/12)) %>%
+  mutate(dose = "Pre") %>%
+  select(donor, identifier, Age_Years, dose)
+
+# Post-dose samples
+dose_ages <- temp_vaccination %>%
+  mutate(dose_num = as.integer(as.character(vaccine_dose))) %>%
+  select(donor, dose_num, dose_age = Age_Years)
+
+post_candidates <- temp_samples %>%
+  select(donor, identifier, Age_Years) %>%
+  inner_join(dose_ages, by = "donor") %>%
+  filter(Age_Years > dose_age) %>%
+  mutate(dist_after = Age_Years - dose_age) %>%
+  group_by(donor, dose_num) %>%
+  slice_min(dist_after, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  mutate(dose = paste0("Dose ", dose_num)) %>%
+  select(donor, identifier, Age_Years, dose)
+
+# Combine and uniqueify
+key_metadata_raw <- bind_rows(birth, pre, post_candidates) %>%
+  mutate(dose_num = case_when(
+    dose == "Birth" ~ 0L,
+    dose == "Pre"   ~ 0L,
+    str_detect(dose, "^Dose ") ~ as.integer(str_extract(dose, "\\d+")),
+    TRUE ~ NA_integer_
+  ))
+
+max_dose <- key_metadata_raw %>% summarise(m = max(dose_num, na.rm = TRUE)) %>% pull(m)
+dose_levels <- c("Birth", "Pre", paste0("Dose ", seq_len(max_dose)))
+
+key_metadata <- key_metadata_raw %>%
+  mutate(dose = factor(dose, levels = dose_levels)) %>%
+  group_by(donor, identifier) %>%
+  slice_max(order_by = as.integer(dose), n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  select(donor, identifier, Age_Years, dose)
+
+# final donor check for key samples count
+temp_donors_final <- key_metadata %>%
+  distinct(donor, identifier) %>%
+  count(donor, name = "n_key_samples") %>%
+  filter(n_key_samples >= 3) %>%
+  pull(donor) %>%
+  unique()
+
+temp_donors_final <- intersect(temp_donors, temp_donors_final)
+temp_samples      <- temp_samples %>% filter(donor %in% temp_donors_final)
+key_metadata      <- key_metadata %>% filter(donor %in% temp_donors_final)
+temp_zs           <- temp_zs %>% filter(donor %in% temp_donors_final)
+```
+
+# Additional processing for plot
+```{r}
+# Prep Plotting Objects 
+
+key_zs <- temp_zs %>%
+  filter(identifier %in% key_metadata$identifier) %>%
+  left_join(key_metadata %>% select(c(identifier, dose)), by = "identifier") %>%
+  mutate(dose = factor(dose, levels = dose_levels))
+
+dose_labels_mmr <- key_metadata %>%
+  group_by(donor, dose) %>%
+  summarise(age = round(mean(Age_Years), 1), .groups = "drop") %>%
+  mutate(
+    dose = factor(dose, levels = dose_levels),
+    dose_lab = paste0(as.character(dose), " (", age, "y)"),
+    x_key = paste(donor, dose, sep = "___")
+  ) %>%
+  arrange(donor, dose)
+
+key_zs2 <- key_zs %>%
+  left_join(dose_labels_mmr %>% select(donor, dose, dose_lab, x_key),
+            by = c("donor", "dose")) %>%
+  mutate(x_key = factor(x_key, levels = unique(dose_labels_mmr$x_key)))
+
+temp_peps <- key_zs2 %>%
+  group_by(id) %>%
+  summarise(n_hits = sum(hit), .groups = "drop") %>%
+  filter(n_hits > 0)
+
+# Define palettes
+measles_pal <- colorRampPalette(c("gray98", "#F87E2E"))(101)
+rubella_pal  <- colorRampPalette(c("gray98", "#FF36B0"))(101)
+
+map_to_hex <- function(z, pal, maxZ = 15) {
+  idx <- round((pmin(pmax(z, 0), maxZ) / maxZ) * 100) + 1
+  pal[idx]
+}
+
+key_zs2 <- key_zs2 %>%
+  mutate(
+    MMRType = case_when(
+      species == "Measles morbillivirus" ~ "Measles",
+      species == "Rubivirus rubellae"   ~ "Rubella",
+      TRUE ~ as.character(species)
+    ),
+    fill_hex = case_when(
+      MMRType == "Measles" ~ map_to_hex(Z_Bound, measles_pal, maxZ = 15),
+      MMRType == "Rubella" ~ map_to_hex(Z_Bound, rubella_pal, maxZ = 15),
+      TRUE ~ map_to_hex(Z_Bound, measles_pal, maxZ = 15)
+    )
+  )
+```
+
+
+
+# Plot
+```{r, fig.width=7,fig.height=6}
+# Panel A: Heatmap
+mmr_heat <- ggplot(key_zs2 %>% filter(id %in% temp_peps$id), aes(x = x_key, y = as.factor(id), fill = fill_hex)) +
+  geom_tile() +
+  facet_grid(MMRType ~ donor, scales = "free", space = "free") +
+  scale_x_discrete(labels = setNames(dose_labels_mmr$dose_lab, dose_labels_mmr$x_key)) +
+  scale_fill_identity(guide = "none") +
+  ylab("VirScan Peptide") +
+  theme_minimal() +
+  theme(
+    text = element_text(family = "Helvetica", color = "black", size = 7),
+    axis.text.x = element_text(angle = 90, size = 7, vjust = 0.5, hjust = 1, color = "black", margin = margin(t = 0, b = 0)),
+    axis.text.y = element_blank(),
+    axis.title = element_text(size = 7),
+    strip.text = element_text(size = 7),
+    axis.ticks.y = element_blank(),
+    legend.position = "none",
+    panel.grid = element_blank(),
+    panel.background = element_blank(),
+    panel.border = element_rect(color = "black", fill = NA),
+    strip.text.y.left = element_text(angle = 0),
+    plot.margin = margin(t = 0, r = 0, b = 0, l = 0) # RESTORED
+  ) +
+  xlab("")
+
+#7 Legends row 7
+legend_df <- tibble(z = seq(0, 15, length.out = 101), meas_hex = measles_pal, rub_hex = rubella_pal, y = 1)
+legend_breaks <- c(0, 5, 10, 15); legend_labels <- c("0", "5", "10", "15")
+
+legend_measles <- ggplot(legend_df, aes(x = z, y = y, fill = meas_hex)) +
+  geom_tile(height = 0.9) +
+  annotate("text", x = 7.5, y = 1, label = "Measles", family = "Helvetica", size = 2.5,  color = "black") +
+  scale_fill_identity() + scale_x_continuous(breaks = legend_breaks, labels = legend_labels, expand = c(0, 0)) +
+  theme_minimal() + theme(text = element_text(family = "Helvetica", color = "black"), axis.title.x = element_blank(), axis.text.x = element_text(size = 7, color = "black"), axis.ticks.x = element_line(linewidth = 0.3, color = "black"), axis.title.y = element_blank(), axis.text.y = element_blank(), axis.ticks.y = element_blank(), panel.grid = element_blank(), plot.margin = margin(t = 0, r = 4, b = 0, l = 4))
+
+legend_rubella <- ggplot(legend_df, aes(x = z, y = y, fill = rub_hex)) +
+  geom_tile(height = 0.9) +
+  annotate("text", x = 7.5, y = 1, label = "Rubella", family = "Helvetica", size = 2.5,  color = "black") +
+  scale_fill_identity() + scale_x_continuous(breaks = legend_breaks, labels = legend_labels, expand = c(0, 0)) +
+  theme_minimal() + theme(text = element_text(family = "Helvetica", color = "black"), axis.title.x = element_blank(), axis.text.x = element_text(size = 7, color = "black"), axis.ticks.x = element_line(linewidth = 0.3, color = "black"), axis.title.y = element_blank(), axis.text.y = element_blank(), axis.ticks.y = element_blank(), panel.grid = element_blank(), plot.margin = margin(t = 0, r = 4, b = 0, l = 4))
+
+legend_title <- ggplot() + annotate("text", x = 0.5, y = 0.5, label = "Bounded Mean EBS", family = "Helvetica", size = 3, fontface = "plain", color = "black") + theme_void() + theme(plot.margin = margin(t = 0, r = 0, b = 0, l = 0))
+top_legends <- cowplot::plot_grid(legend_measles + theme(plot.margin = margin(0, 5, 0, 0)), legend_rubella + theme(plot.margin = margin(0, 0, 0, 5)), ncol = 2, rel_widths = c(1, 1))
+panel_top <- cowplot::plot_grid(legend_title, top_legends, ncol = 1, rel_heights = c(0.35, 1))
+top_legends
+
+# Plot Panel B 
+temp_df_grouped <- temp_zs %>% group_by(donor, species, Age_Years) %>% summarise(n_hits_donor = sum(hit, na.rm = TRUE), .groups = "drop") %>% filter(donor %in% temp_donors_final)
+vax_lines <- temp_vaccination %>% group_by(donor) %>% summarise(vax_age = first(Age_Years), .groups = "drop") %>% filter(donor %in% temp_donors_final)
+
+p_mmr_hits_time <- ggplot(temp_df_grouped %>% mutate(species_label = case_when(species == "Measles morbillivirus" ~ "Measles", species == "Rubivirus rubellae" ~ "Rubella", TRUE ~ as.character(species))), aes(x = Age_Years, y = n_hits_donor, color = species_label)) +
+  geom_line(linewidth = 0.8) + geom_point(size = 1.6) +
+  geom_vline(data = vax_lines, aes(xintercept = vax_age), linetype = "dashed", linewidth = 0.6, color = "black", alpha = 0.6) +
+  facet_wrap(~ donor, nrow = 1) +
+  xlab("Age (years)") + ylab("# peptides targeted") +
+  theme_minimal() +
+  theme(text = element_text(family = "Helvetica"), axis.title = element_text(size = 7), strip.text = element_text(size = 7), axis.text = element_text(size = 7), legend.title = element_text(size = 7), legend.text = element_text(size = 7), legend.position = "top", legend.margin = margin(t = 0, r = 0, b = 0, l = 0), legend.box.margin = margin(t = -2, r = 0, b = -2, l = 0), panel.grid = element_blank(), panel.border = element_rect(color = "black", fill = NA), plot.margin = margin(t = 0, r = 0, b = 0, l = 5)) +
+  scale_color_manual(name = "Virus", values = c("Measles" = pal1[1], "Rubella" = pal1[8]))
+
+# Final Combine 
+panel_top_conv <- ggplotify::as.ggplot(panel_top) + theme(plot.margin = margin(t = 0, r = 0, b = 0, l = 0))
+
+Fig_6 <- ggarrange(
+  ggarrange(ggplot(NULL) + theme_void(), panel_top_conv, ggplot(NULL) + theme_void(), widths = c(0.75, 18, 0.75), nrow = 1),
+  ggarrange(ggplot(NULL) + theme_void(), mmr_heat, widths = c(0.6, 18), nrow = 1),
+  ggarrange(p_mmr_hits_time, ggplot(NULL) + theme_void(), widths = c(18, 0.65), nrow = 1),
+  labels = c("a", "", "b"), ncol = 1, heights = c(0.18, 1.25, 0.8), font.label = list(family = "Helvetica", size = 8)
+)
+
+Fig_6
+ggsave(file=paste0(folder_path_save, "/AVARS_Figure_6_Final.pdf"))
+dev.off()
+```
+
+# Figure S11: Influenza
+# Influenza analysis
+# Process data for downstream analysis
+```{r, fig.height=6}
+# Identify vaccinated donors and prep data for virus
+temp_donors <- Vaccination_Data %>% filter(species %in% c("Influenza B virus","Influenza A virus")) %>% select(donor, cohort, Sex, Age_Years, Age_Months, Pathogen) %>% distinct()%>% group_by(donor)%>% select(donor) %>% distinct() %>% unlist() %>% unname()
+temp_samples <- combined_metadata_dist %>% filter(donor %in% temp_donors)
+temp_peptides <- Viral_Annotations %>% filter(species %in% c("Influenza A virus","Influenza B virus"))
+temp_vaccination <- Vaccination_Data %>% filter(donor %in% temp_donors, species %in% c("Influenza A virus","Influenza B virus")) %>% select(-c(species,Vaccine_Name_English)) %>% distinct() %>% group_by(donor) %>% arrange(Age_Years)%>% mutate(vaccine_dose=as.factor(row_number())) 
+temp_consec_zs <- Birth_Consec_Zs %>% filter(donor %in% temp_donors, id %in% temp_peptides$id)
+temp_zs <- all_zs_combined %>% select(c(id,all_of(temp_samples$identifier))) %>% filter(id %in% temp_peptides$id) %>% bound_Z(upper=25) %>% left_join(Viral_Annotations %>% select(c(id,Entry,`Entry name`,species,`Protein names`,Organism))) %>% pivot_longer(-c(id,Entry,`Entry name`,species,`Protein names`,Organism),names_to = "identifier",values_to = "Z_Bound") %>% mutate(hit=ifelse(Z_Bound>=3.5,1,0)) %>% left_join(temp_samples %>% select(c(identifier,Age_Years,donor)))
+```
+
+# Prepare data and identify which flu strains to include in plots
+Strains vaccinated against in window "Influenza A virus (A/Brisbane/59/2007(H1N1))", "Influenza A virus (A/Brisbane/10/2007(H3N2))","Influenza A virus (A/California/07/2009(H1N1))", "Influenza B virus (B/Brisbane/60/2008)"
+
+```{r, fig.width=10}
+# Limit to human influenza strains
+influenza_peptides <- Viral_Annotations %>% 
+  filter(species %in% c("Influenza A virus","Influenza B virus")) %>%
+  filter(!grepl("swine",Organism,ignore.case=TRUE),
+         !grepl("chicken",Organism,ignore.case=TRUE),
+         !grepl("mallard",Organism,ignore.case=TRUE),
+         !grepl("ruddy turnstone",Organism,ignore.case=TRUE),
+         !grepl("duck",Organism,ignore.case=TRUE),
+         !grepl("Turkey",Organism,ignore.case=TRUE),
+         !grepl("Equine",Organism,ignore.case=TRUE),
+         !grepl("Seal",Organism,ignore.case=TRUE),
+         !grepl("camel",Organism,ignore.case=TRUE),
+         !grepl("teal",Organism,ignore.case=TRUE),
+         !grepl("goose",Organism,ignore.case=TRUE),
+         !grepl("fowl",Organism,ignore.case=TRUE))
+
+# Subset maternal/endogenous labeled df to these peptide responses only
+temp_hits_by_maternal <- hits_by_maternal %>% filter(id %in% influenza_peptides$id, identifier %in% temp_samples$identifier) %>% select(c(id,species,Organism,identifier,hit,donor,Age_Years,zscore,trunc_zscore,maternal)) %>% left_join(IgG_Data %>% select(c(identifier,collect_date))) %>% mutate(donor_peptide_key=paste0(donor,"_",id))
+temp_ever_hit <- temp_hits_by_maternal %>% group_by(donor_peptide_key,id,species,Organism) %>% summarise(n_hits=sum(hit)) %>% filter(n_hits>0)
+temp_hits_by_maternal %>% select(id) %>% distinct() %>% nrow() #3935 peptides total
+temp_ever_hit %>% ungroup()%>% select(id) %>% distinct() %>% nrow() #1766 flu peptides hit
+
+#count how many peptides per entry are in the library, how many birth samples target the entry, and how many samples closest to 2 years old target the sample
+flu_entries <- Viral_Annotations %>% filter(id %in% influenza_peptides$id) %>% 
+  group_by(Entry,`Entry name`,NCBI_txid,genus,species,`Protein names`,`Gene names`,`Taxonomic lineage (ALL)`,Organism) %>% 
+  summarise(n_peptides_in_lib=n()) %>% # count how many peptides per entry are in the library
+  left_join(temp_hits_by_maternal %>% 
+              left_join(Viral_Annotations %>% select(c(id,Entry))) %>% 
+              filter(Age_Years==0,hit==1) %>% group_by(donor,Organism,Entry) %>% 
+              summarise(n_pep_targ=sum(hit)) %>% ungroup %>% group_by(Organism,Entry) %>% 
+              summarise(n_rec_entry_maternal = n(), avg_pep_rec_maternal=mean(n_pep_targ))
+            ) %>% # how many birth samples target the entry (at least 1 peptide)
+  left_join(temp_hits_by_maternal %>% group_by(id,donor) %>% 
+              mutate(dist_from_2=abs(Age_Years-2)) %>% 
+              slice_min(order_by = dist_from_2,n=1) %>% 
+              ungroup() %>% left_join(Viral_Annotations %>% select(c(id,Entry))) %>%
+              filter(hit==1)  %>% group_by(donor,Organism,Entry) %>% 
+              summarise(n_pep_targ=sum(hit)) %>% group_by(Organism,Entry) %>% 
+              summarise(n_rec_entry_endog = n(), avg_pep_rec_endog=mean(n_pep_targ))
+            ) # how many samples closest to 2 years old target the entry (at least 1 peptide)
+
+# Limit to entries recognized and label HA and N
+temp_ever_hit_entries <- temp_ever_hit %>% ungroup() %>% select(id) %>% distinct() %>% left_join(influenza_peptides %>% select(c(id,Entry)))
+```
+# Identify and label peptides and proteins for strains of interest
+```{r}
+# Focus on Influenza A
+flu_a_entries <- flu_entries %>% 
+  filter(species=="Influenza A virus") %>% 
+  mutate(n_rec_entry_maternal=ifelse(is.na(n_rec_entry_maternal),0,n_rec_entry_maternal)) %>% 
+  mutate(n_rec_entry_endog=ifelse(is.na(n_rec_entry_endog),0,n_rec_entry_endog)) %>% 
+  filter(Entry %in% temp_ever_hit_entries$Entry) %>% 
+  mutate(`Gene names`=ifelse(grepl("Neuraminidase",`Protein names`,ignore.case=TRUE),"NA",`Gene names`)) %>% 
+  mutate(`Gene names`=ifelse(grepl("Hemagglutinin",`Protein names`,ignore.case=TRUE),"HA",`Gene names`))
+
+flu_a_entries
+
+# Identify strains with NA and HA sequences
+HA_NA_entries <- flu_a_entries %>% 
+  filter(`Gene names` %in% c("HA","NA"), n_peptides_in_lib > 4) %>% 
+  mutate(
+    is_pdm09 = grepl("2009", Organism),
+    plot_strain_label = ifelse(is_pdm09,
+                              "Influenza A virus (A(H1N1)pdm09 lineage)",
+                              Organism),
+    score = pmax(avg_pep_rec_maternal, avg_pep_rec_endog, na.rm = TRUE)
+  ) %>%
+  group_by(plot_strain_label, `Gene names`) %>%
+  filter(!any(is_pdm09) | row_number(desc(score)) == 1) %>%  # only collapse pdm09 groups
+  ungroup() %>%
+  select(-is_pdm09, -score)
+
+HA_NA_entries %>% group_by(plot_strain_label) %>% summarise(n_HA_ent=sum(`Gene names`=="HA"),n_NA_ent=sum(`Gene names`=="NA")) %>% filter(n_HA_ent>0,n_NA_ent>0) %>% select(plot_strain_label)  # of this list of strains with NA and HA sequences in the library, "Influenza A virus (strain A/Brevig Mission/1/1918 H1N1) (Influenza A virus (strain A/South Carolina/1/1918 H1N1))","Influenza A virus (strain A/Korea/426/1968 H2N2)","Influenza A virus (strain A/Hong Kong/1/1968 H3N2)","Influenza A virus (strain A/Victoria/3/1975 H3N2)","Influenza A virus (strain A/Beijing/353/1989 H3N2)","Influenza A virus (A/Brisbane/10/2007(H3N2))","Influenza A virus (strain A/Kiev/59/1979 H1N1)","Influenza A virus (strain A/China:Nanchang/11/1996 H1N1)","Influenza A virus (strain A/USA:Texas/UR06-0195/2007 H1N1)","Influenza A virus (A(H1N1)pdm09 lineage)","Influenza A virus (strain A/Hong Kong/212/2003 H5N1 genotype Z+)" are from distinct antigenic clusters
+
+HA_NA_entries <- HA_NA_entries %>% filter(plot_strain_label %in% c("Influenza A virus (strain A/Brevig Mission/1/1918 H1N1) (Influenza A virus (strain A/South Carolina/1/1918 H1N1))","Influenza A virus (strain A/Korea/426/1968 H2N2)","Influenza A virus (strain A/Hong Kong/1/1968 H3N2)","Influenza A virus (strain A/Victoria/3/1975 H3N2)","Influenza A virus (strain A/Beijing/353/1989 H3N2)","Influenza A virus (A/Brisbane/10/2007(H3N2))","Influenza A virus (strain A/Kiev/59/1979 H1N1)","Influenza A virus (strain A/China:Nanchang/11/1996 H1N1)","Influenza A virus (strain A/USA:Texas/UR06-0195/2007 H1N1)","Influenza A virus (A(H1N1)pdm09 lineage)","Influenza A virus (strain A/Hong Kong/212/2003 H5N1 genotype Z+)"))
+
+# Determine who is flu exposed.
+temp_donors <- Vaccination_Data %>% 
+  filter(species %in% c("Influenza B virus","Influenza A virus")) %>% 
+  select(donor, cohort, Sex, Age_Years, Age_Months, Pathogen) %>% 
+  distinct() %>% 
+  group_by(donor) %>% 
+  summarise(n_vax=n()) %>%
+  filter(n_vax>1) %>% 
+  select(donor) %>% 
+  distinct() %>% 
+  unlist() %>% 
+  unname()
+
+hm_hits <- Mat_end_hits %>% 
+  filter(donor %in% temp_donors) %>% 
+  left_join(Viral_Annotations %>% select(c(Entry, id))) %>% 
+  filter(Entry %in% HA_NA_entries$Entry) %>% 
+  left_join(HA_NA_entries %>% ungroup() %>% select(c(Entry,plot_strain_label,`Gene names`))) %>% 
+  mutate(HA_number = str_extract(plot_strain_label, "(?<=H)\\d+"), NA_number = str_extract(plot_strain_label, "(?<=N)\\d+"), HA_NA_subtype = str_extract(plot_strain_label, "H\\d+N\\d+")) # adds substype information
+
+# add shortened lables for plot
+temp<-data.frame("plot_strain_label"=c(unique(hm_hits$plot_strain_label)),"short_strain"=c("A/H1N1pdm09/2009","A/Brevig Mission/1/1918(H1N1)","A/Hong Kong/212/2003(H5N1)","A/Texas/UR06-0195/2007(H1N1)","A/Kiev/59/1979(H1N1)","A/Korea/426/1968(H2N2)","A/Victoria/3/1975(H3N2)","A/China:Nanchang/11/1996(H1N1)","A/Beijing/353/1989(H3N2)","A/Hong Kong/1/1968(H3N2)","A/Brisbane/10/2007(H3N2)"))%>%
+  mutate(
+    short_strain_pretty2 = case_when(
+      
+      # pandemic strain
+      str_detect(short_strain, "pdm09") ~ "A/pdm09/2009 (H1N1)",
+      
+      # general case: A/Location/Number/Year(HxNy)
+      TRUE ~ str_replace(
+        short_strain,
+        "A/([^/]+)/[^/]+/([0-9]{4}).*\\((H[0-9]N[0-9]).*",
+        "A/\\1/\\2 (\\3)"
+      )
+    ),
+    
+    # remove country prefix before colon (e.g., China:Nanchang → Nanchang)
+    short_strain_pretty2 = str_replace(short_strain_pretty2,
+                                       "A/[^:]+:([^/]+)/",
+                                       "A/\\1/"),
+    
+    # allow wrapping at slash and before subtype
+    short_strain_wrap = short_strain_pretty2 %>%
+      str_replace_all("/", "/ ") %>%
+      str_replace_all("\\(", " (")
+  )
+
+hm_hits <-hm_hits %>% left_join(temp)
+
+rm(temp)
+
+# Define key samples (birth and immediate after last vaccine dose)
+temp_samples <- combined_metadata_dist %>% 
+  filter(donor %in% temp_donors) 
+
+temp_peptides <-unique(hm_hits$id) 
+
+temp_consec_zs <- Birth_Consec_Zs %>% filter(donor %in% temp_donors,id %in% temp_peptides) 
+
+key_metadata <- temp_samples %>% filter(Age_Years==0) %>% mutate(dose="Birth") %>% bind_rows(temp_samples %>% left_join(temp_vaccination %>% group_by(donor) %>% slice_max(order_by = vaccine_dose,n=1) %>% mutate(dose_max_age=Age_Years) %>% select(c(donor,dose_max_age,vaccine_dose))) %>% filter(Age_Years>dose_max_age) %>% mutate(dist_from_dose_4=Age_Years-dose_max_age) %>% group_by(donor) %>% arrange(dist_from_dose_4) %>% slice_min(dist_from_dose_4,n=1) %>% select(-c(dose_max_age,dist_from_dose_4)) %>% mutate(dose="Last Dose")) 
+
+```
+
+# Label donor data and define donor subsets
+```{r}
+dose1_age <- temp_vaccination %>%
+  group_by(donor) %>%
+  slice_min(order_by = as.numeric(as.character(vaccine_dose)), n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  transmute(donor, dose1_age = Age_Years)
+
+
+last_dose_age <- temp_vaccination %>%
+  group_by(donor) %>%
+  slice_max(order_by = as.numeric(as.character(vaccine_dose)), n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  transmute(donor, last_dose_age = Age_Years)
+
+birth <- temp_samples %>%
+  filter(Age_Years == 0) %>%
+  group_by(donor) %>%
+  slice_min(Age_Years, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  mutate(dose = "Birth") %>%
+  select(donor, identifier, Age_Years, dose)
+
+# Sample before vaccination but after at least 6 months of age
+pre <- temp_samples %>%
+  left_join(dose1_age, by = "donor") %>%
+  filter(Age_Years < dose1_age) %>%
+  mutate(dist_from_dose1 = abs(Age_Years - dose1_age)) %>%
+  group_by(donor) %>%
+  slice_min(dist_from_dose1, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  filter(Age_Years >= (6/12)) %>%  # >= 6 months
+  mutate(dose = "Pre") %>%
+  select(donor, identifier, Age_Years, dose)
+
+# Sample after but closest to last vaccine dose
+last <- temp_samples %>%
+  left_join(last_dose_age, by = "donor") %>%
+  filter(Age_Years > last_dose_age) %>%
+  mutate(dist_from_last = Age_Years - last_dose_age) %>%
+  group_by(donor) %>%
+  slice_min(dist_from_last, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  mutate(dose = "Last") %>%
+  select(donor, identifier, Age_Years, dose)
+
+key_metadata2 <- bind_rows(birth, pre, last) %>%
+  mutate(dose = factor(dose, levels = c("Birth","Pre","Last")))
+
+# keep donors with all 3 timepoints
+keep_donors <- key_metadata2 %>%
+  count(donor, dose) %>%
+  count(donor) %>%
+  filter(n == 3) %>%
+  pull(donor)
+
+key_metadata2 <- key_metadata2 %>% filter(donor %in% keep_donors)
+```
+
+
+# Figure S11
+```{r, fig.width=7, fig.height=3.5}
+# Set Parameters
+flu_seasons <- tibble(xmin = as.Date(c("2008-11-01","2009-11-01","2010-11-01","2011-11-01","2012-11-01")), xmax = as.Date(c("2009-04-30","2010-04-30","2011-04-30","2012-04-30","2013-04-30")), fill_lab = "Flu season") # Define flu season to November 1 to April 15 of each year
+# Events dataframe (blood draws + vaccinations) 
+blood_draws <- IgG_Data %>% filter(identifier %in% temp_samples$identifier) %>% transmute( donor, date = as.Date(collect_date, format = "%m/%d/%y"), event_row = "Blood draw", event_color = "Blood draw" ) %>% distinct() 
+vax_events <- temp_vaccination %>% transmute(donor, date = do_vax, event_row = ifelse(grepl("H1N1", Vaccine_Targets, ignore.case = TRUE), "Pandemic Vaccine", "Seasonal Vaccine"), event_color = event_row ) %>% distinct() 
+event_df <- bind_rows(blood_draws, vax_events) %>% mutate(event_row = factor(event_row, levels = c("Blood draw","Seasonal Vaccine","Pandemic Vaccine"))) 
+# Filter hits to those peptides ever hit by a given donor and flu strains of interest then group by strain and sum 
+hits_df <- temp_hits_by_maternal %>% 
+  filter(donor_peptide_key %in% temp_ever_hit$donor_peptide_key) %>% 
+  mutate(plot_strain_label=ifelse(Organism %in% c("Influenza A virus (A/New York/19/2009(H1N1))", "Influenza A virus (A/Ohio/07/2009(H1N1))"), "Influenza A virus (A(H1N1)pdm09 lineage)", Organism)) %>% # All 2009 strains represent the pandemic strain. These two entries are HA and NA entries with good coverage
+  filter (plot_strain_label %in% c( "Influenza A virus (A/Brisbane/59/2007(H1N1))", "Influenza A virus (A/Brisbane/10/2007(H3N2))", "Influenza A virus (A(H1N1)pdm09 lineage)", "Influenza B virus (B/Brisbane/60/2008)","Influenza A virus (strain A/Bangkok/1/1979 H3N2)","Influenza A virus (strain A/Beijing/352/1989 H3N2)")) %>% # These are vaccine strains administered during sampling and pre-birth strains from different antigenic clusters
+  group_by(identifier, donor, Age_Years, maternal, collect_date, species, plot_strain_label) %>% 
+  summarise(n_hits = sum(hit), .groups = "drop") %>% 
+  mutate(date = as.Date(collect_date, format = "%m/%d/%y")) %>% mutate(
+  plot_strain_label_pretty2 = case_when(
+    # pdm09 collapse
+    plot_strain_label == "Influenza A virus (A(H1N1)pdm09 lineage)" ~ "A/pdm09/2009 (H1N1)",
+
+    # Influenza A "A/Location/Number/Year(Subtype)" -> "A/Location/Year (Subtype)"
+    str_detect(plot_strain_label, "^Influenza A virus \\(A/") ~
+      plot_strain_label %>%
+        str_replace("^Influenza A virus \\(", "") %>%
+        str_replace("\\)$", "") %>%
+        str_replace("A/([^/]+)/[^/]+/([0-9]{4})\\((H[0-9]N[0-9])\\)", "A/\\1/\\2 (\\3)"),
+
+    # Influenza A "strain A/Location/Number/Year HxNy" -> "A/Location/Year (HxNy)"
+    str_detect(plot_strain_label, "^Influenza A virus \\(strain A/") ~
+      plot_strain_label %>%
+        str_replace("^Influenza A virus \\(strain ", "") %>%
+        str_replace("\\)$", "") %>%
+        str_replace("A/([^/]+)/[^/]+/([0-9]{4}) (H[0-9]N[0-9])", "A/\\1/\\2 (\\3)"),
+
+    # Influenza B: keep tidy
+    plot_strain_label == "Influenza B virus (B/Brisbane/60/2008)" ~ "B/Brisbane/2008",
+
+    TRUE ~ plot_strain_label
+  )
+)
+
+# Split donors into two groups for plotting 
+donor_levels <- sort(intersect(unique(event_df$donor), unique(hits_df$donor))) 
+half <- ceiling(length(donor_levels) / 2) 
+donors_1 <- donor_levels[1:half] 
+donors_2 <- donor_levels[(half + 1):length(donor_levels)]
+
+  x_min <- min(c(hits_df$date, event_df$date, flu_seasons$xmin), na.rm = TRUE)
+  x_max <- max(c(hits_df$date, event_df$date, flu_seasons$xmax), na.rm = TRUE)
+
+make_combined_plot <- function(donor_subset) {
+  event_sub <- event_df %>%
+    filter(donor %in% donor_subset) %>%
+    mutate(donor = factor(donor, levels = donor_subset))
+  hits_sub <- hits_df %>%
+    filter(donor %in% donor_subset) %>%
+    mutate(donor = factor(donor, levels = donor_subset))
+  
+  event_plot <- ggplot(event_sub, aes(x = date, y = event_row)) +
+    geom_rect(data = flu_seasons, inherit.aes = FALSE,
+              aes(xmin = xmin, xmax = xmax, ymin = -Inf, ymax = Inf, fill = fill_lab),
+              alpha=0.15) +
+    geom_point(aes(colour = event_color), pch=20, size=1) +
+    facet_wrap(~donor, nrow=1, scales = "free_x") +
+    scale_fill_manual(values = c("Flu season" = pal1[3]), name = "") +
+    scale_color_manual(values = c("Blood draw" = "black",
+                                  "Seasonal Vaccine" = pal1[4],
+                                  "Pandemic Vaccine" = pal1[7]),
+                       name = "Event") +
+    coord_cartesian(xlim = c(x_min, x_max)) +
+    theme_minimal() +
+    theme(text             = element_text(family = "Helvetica", color = "black", size = 7),
+          axis.title.x     = element_text(size=7),
+          axis.title.y     = element_blank(),
+          axis.text.y        = element_text(size = 7, color = "black"),
+          axis.text.x        = element_text(size = 7, angle=90, color = "black", hjust = 0, vjust = 0.5),
+          axis.ticks.x = element_line(),
+          legend.position  = "none",    
+          strip.background = element_blank(),
+          strip.text       = element_blank(),
+          panel.spacing    = unit(6, "pt"),
+          panel.grid       = element_blank(),
+          panel.border     = element_rect(fill=NA,colour = "black")
+          ) +
+    guides(fill = "none", colour = "none") +
+    xlab("Date") 
+  
+  
+  hit_plot <- ggplot(hits_sub, aes(x = date, y = n_hits)) +
+    geom_rect(data = flu_seasons, inherit.aes = FALSE,
+              aes(xmin = xmin, xmax = xmax, ymin = -Inf, ymax = Inf, fill = fill_lab),
+              alpha=0.15) +
+    geom_line(aes(color = plot_strain_label_pretty2, linetype = maternal)) +
+    facet_wrap(~ donor, nrow = 1, scales = "free_x") +
+    scale_fill_manual(values = c("Flu season" = pal1[3]), name = "") +
+    theme_minimal() +
+    coord_cartesian(xlim = c(x_min, x_max)) +
+    theme(text             = element_text(family = "Helvetica", color = "black", size = 7),
+          axis.title.y     = element_text(size=7),
+          axis.title.x     = element_blank(),
+          axis.text.y      = element_text(size = 7, color = "black"),
+          axis.text.x      = element_blank(),
+          strip.text       = element_text(size = 7),
+          panel.spacing    = unit(6, "pt"),
+          legend.position  = "none",
+          panel.grid       = element_blank(),
+          panel.border     = element_rect(fill=NA,colour = "black"),
+          legend.title     = element_text(size = 7),
+          legend.text      = element_text(size = 7),
+          legend.box       = "vertical"
+          ) +
+    ylab("Number of hits") +
+    scale_color_manual(values = pal1[c(1,9,4,5,7,3)], name = "Strain") +
+    scale_linetype_discrete(name = "Antibody source")   +
+    ylim(c(0,15))
+  
+    ggpubr::ggarrange(
+    hit_plot + theme(plot.margin = margin(0, 5.5, 0, 5.5)),
+    event_plot + theme(plot.margin = margin(0, 5.5, 0, 5.5)),
+    ncol = 1,
+    heights = c(1.5, 1.25),
+    common.legend = FALSE,
+    legend = "none",
+    align = "v"
+  )
+}
+
+
+legend_grob <- ggpubr::get_legend(
+  ggplot(
+    hits_df %>%
+      filter(donor %in% donors_1) %>%
+      mutate(donor = factor(donor, levels = donors_1)),
+    aes(x = date, y = n_hits)
+  ) +
+  geom_rect(data = data.frame(dummy = 1),inherit.aes = FALSE, aes(xmin=as.Date("2011-11-1"),xmax =as.Date("2012-4-15"),fill = "Flu season", 
+            ymin=0, ymax = 17),
+            alpha=0.15)  +
+    # real legend mappings
+    geom_line(aes(color = plot_strain_label_pretty2, linetype = maternal)) +
+    scale_color_manual(values = pal1[c(1,9,4,5,7,3)], name = "Strain") +
+    scale_linetype_discrete(name = "Antibody source") +
+    scale_fill_manual(values = c("Flu season" = pal1[3]), name = "") +
+    theme_minimal() +
+    theme(
+      legend.position = "top",
+      legend.box = "horizontal",
+      legend.direction = "vertical",
+      legend.title = element_text(size = 7),
+      legend.text  = element_text(size = 7),
+      plot.margin = margin(0, 0, 0, 0)
+    ) +
+    guides(
+      fill = guide_legend(order = 1, override.aes = list(alpha = 0.15, colour = NA)),
+      linetype = guide_legend(order = 2),
+      colour = guide_legend(order = 3, ncol=2)
+    )
+)
+
+
+Fig_S11_A <- ggpubr::ggarrange(
+  ggpubr::as_ggplot(legend_grob),
+    make_combined_plot(keep_donors),
+  nrow = 2,
+  heights = c(0.4, 0.8)
+)
+Fig_S11_A
+```
+# Generate heatmap of number of peptides targeted for key strains
+```{r, fig.width=7}
+# Key timepoints for heatmap: Birth, Pre-vaccination (>=9 months), and first sample after last dose
+# Summarize for each donor
+heat_df <- hm_hits %>%
+  filter(donor %in% keep_donors, identifier %in% key_metadata2$identifier) %>%
+  left_join(key_metadata2 %>% select(identifier, dose), by = "identifier") %>%
+  group_by(donor, short_strain, `Gene names`, dose) %>%
+  summarise(
+    mean_z = mean(zscore, na.rm = TRUE),
+    n_hits = sum(hit == 1, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+strain_levels <- c(
+  "A/Brevig Mission/1/1918(H1N1)",
+  "A/Kiev/59/1979(H1N1)",
+  "A/China:Nanchang/11/1996(H1N1)",
+  "A/Texas/UR06-0195/2007(H1N1)",
+  "A/H1N1pdm09/2009",
+  "A/Korea/426/1968(H2N2)",
+  "A/Hong Kong/1/1968(H3N2)",
+  "A/Victoria/3/1975(H3N2)",
+  "A/Beijing/353/1989(H3N2)",
+  "A/Brisbane/10/2007(H3N2)",
+  "A/Hong Kong/212/2003(H5N1)"
+) # Order by subtype and year
+
+
+
+# Make a donor-specific x key so ordering can differ by facet (even with free_x)
+dose_labels <- key_metadata2 %>%
+  group_by(donor, dose) %>%
+  summarise(age = round(mean(Age_Years), 1), .groups = "drop") %>%
+  mutate(
+    dose = factor(dose, levels = c("Birth","Pre","Last")),
+    dose_lab = paste0(as.character(dose), " (", age, "y)"),
+    x_key = paste(donor, dose, sep = "___")   # donor-specific x
+  ) %>%
+  arrange(donor, dose)
+
+heat_df2 <- heat_df %>%
+  left_join(dose_labels %>% select(donor, dose, dose_lab, x_key),
+            by = c("donor","dose")) %>%
+  mutate(
+    x_key = factor(x_key, levels = unique(dose_labels$x_key))  # global order = donor then Birth/Pre/Last
+  )
+
+Fig_S11_B <- ggplot(
+  heat_df2,
+  aes(
+    x = x_key,
+    y = factor(short_strain, levels = strain_levels),
+    fill = as.factor(n_hits)
+  )
+) +
+  geom_tile(color = "white", linewidth = 0.25) +
+  facet_grid(`Gene names` ~ donor, scales = "free_x", space = "free_x") +
+  scale_x_discrete(labels = setNames(dose_labels$dose_lab, dose_labels$x_key)) +
+  scale_fill_manual(
+    values = c("white", "#E6E0FB", "#CDC2F7", "#B3A3F2", "#9870F5", "#5B2CBF", "#2E1560"),
+    name = "# peptide\nhits"
+  ) +
+  theme_minimal() +
+  theme(
+    text = element_text(family = "Helvetica", colour = "black", size = 7),
+    axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1, size = 7),
+    axis.text.y = element_text(size = 7),
+    strip.text.x = element_text(size = 7),
+    strip.text.y = element_text(size = 7),
+    legend.title = element_text(size = 7),
+    legend.text  = element_text(size = 7),
+    panel.grid = element_blank(),
+    panel.background = element_rect(fill = "grey99")
+  ) +
+  xlab("") +
+  ylab("Strain")
+
+Fig_S11_B
+```
+
+```{r,fig.width=7,fig.height=6.5}
+ggarrange(ggarrange(Fig_S11_A,ggplot(NULL)+theme_void(),ncol = 2,widths = c(15,1)),
+          Fig_S11_B +
+            theme(legend.background = element_rect(color = "black"),
+                  legend.position = "right",
+                  axis.text = element_text(color = "black")) +
+            guides(fill = guide_legend(ncol=1)),
+          labels=c("a","b"),
+          ncol=1,
+          font.label = list(family="Helvetica",size=8),
+          heights = c(2.2,2.5)
+          )
+ggsave(file=paste0(folder_path_save, "/AVARS_Figure_S11_Final.pdf"))
+dev.off()
+
+```
+
+
+# Figure S12: Polio and Rubella
+```{r}
+# Polio
+# Identify vaccinated donors and prep data for virus 
+temp_donors <- Vaccination_Data %>% 
+  filter(species=="Enterovirus C",Age_Years<1.25) %>% 
+  group_by(donor) %>% 
+  summarise(n_vaccination = n()) %>% 
+  filter(n_vaccination==3) %>% 
+  select(donor) %>% 
+  distinct() %>% 
+  unlist() %>% 
+  unname() 
+temp_samples <- combined_metadata_dist %>% filter(donor %in% temp_donors) 
+
+temp_peptides <- Viral_Annotations %>% 
+  filter(species=="Enterovirus C") %>% 
+  filter(grepl("Poliovirus",Organism)) 
+
+temp_vaccination <- Vaccination_Data %>% 
+  filter(donor %in% temp_donors, species=="Enterovirus C") %>% 
+  group_by(donor) %>% 
+  arrange(Age_Years) %>% 
+  mutate(vaccine_dose=as.factor(row_number())) 
+
+temp_consec_zs <- Birth_Consec_Zs %>% filter(donor %in% temp_donors,species=="Enterovirus C") 
+
+temp_zs <- all_zs_combined %>% 
+  select(c(id,all_of(temp_samples$identifier))) %>% 
+  filter(id %in% temp_peptides$id) %>% 
+  bound_Z(upper=15) %>% 
+  left_join(Viral_Annotations %>% select(c(id,Entry,`Entry name`,species,`Protein names`,Organism))) %>% 
+  pivot_longer(-c(id,Entry,`Entry name`,species,`Protein names`,Organism), names_to = "identifier",values_to = "Z_Bound") %>% 
+  mutate(hit=ifelse(Z_Bound>=3.5,1,0)) %>% 
+  left_join(temp_samples %>% select(c(identifier,Age_Years,donor))) 
+
+temp_zs <- temp_zs %>% 
+  mutate(Poliovirus=ifelse(grepl("type 1",Organism),"Type 1",NA)) %>% 
+  mutate(Poliovirus=ifelse(grepl("type 2",Organism), "Type 2",Poliovirus)) %>% 
+  mutate(Poliovirus=ifelse(grepl("type 3",Organism),"Type 3",Poliovirus)) # label by polio type
+
+# Key timepoints: Birth, Pre (closest < Dose 1; >=6mo), and first sample after each dose 
+# Key timepoints: Birth, Pre (closest < Dose 1; >=6mo), and first sample after each dose 
+
+# dose ages
+dose1_age <- temp_vaccination %>%
+  group_by(donor) %>%
+  slice_min(order_by = as.numeric(as.character(vaccine_dose)), n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  transmute(donor, dose1_age = Age_Years)
+
+dose2_age <- temp_vaccination %>%
+  filter(vaccine_dose == 2) %>%
+  transmute(donor, dose2_age = Age_Years)
+
+dose3_age <- temp_vaccination %>%
+  filter(vaccine_dose == 3) %>%
+  transmute(donor, dose3_age = Age_Years)
+
+# Birth
+birth <- temp_samples %>%
+  filter(Age_Years == 0) %>%
+  group_by(donor) %>%
+  slice_min(Age_Years, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  mutate(dose = "Birth") %>%
+  select(donor, identifier, Age_Years, dose)
+
+# Pre-vax: closest sample before Dose 1
+pre <- temp_samples %>%
+  left_join(dose1_age, by = "donor") %>%
+  filter(Age_Years < dose1_age) %>%
+  mutate(dist_from_dose1 = abs(Age_Years - dose1_age)) %>%
+  group_by(donor) %>%
+  slice_min(dist_from_dose1, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  mutate(dose = "Pre") %>%
+  select(donor, identifier, Age_Years, dose)
+
+# Post-dose 1
+post_dose1 <- temp_samples %>%
+  left_join(dose1_age, by = "donor") %>%
+  filter(Age_Years > dose1_age) %>%
+  mutate(dist_from_dose1 = Age_Years - dose1_age) %>%
+  group_by(donor) %>%
+  slice_min(dist_from_dose1, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  mutate(dose = "Dose 1") %>%
+  select(donor, identifier, Age_Years, dose)
+
+# Post-dose 2
+post_dose2 <- temp_samples %>%
+  left_join(dose2_age, by = "donor") %>%
+  filter(Age_Years > dose2_age) %>%
+  mutate(dist_from_dose2 = Age_Years - dose2_age) %>%
+  group_by(donor) %>%
+  slice_min(dist_from_dose2, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  mutate(dose = "Dose 2") %>%
+  select(donor, identifier, Age_Years, dose)
+
+# Post-dose 3
+post_dose3 <- temp_samples %>%
+  left_join(dose3_age, by = "donor") %>%
+  filter(Age_Years > dose3_age) %>%
+  mutate(dist_from_dose3 = Age_Years - dose3_age) %>%
+  group_by(donor) %>%
+  slice_min(dist_from_dose3, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  mutate(dose = "Dose 3") %>%
+  select(donor, identifier, Age_Years, dose)
+
+key_metadata <- bind_rows(birth, pre, post_dose1, post_dose2, post_dose3) %>%
+  mutate(dose = factor(dose, levels = c("Birth","Pre","Dose 1","Dose 2","Dose 3")))
+
+key_metadata <- key_metadata %>%
+  group_by(donor, identifier) %>%
+  # slice_max on integer value of dose 
+  slice_max(order_by = as.integer(dose), n = 1, with_ties = FALSE) %>%
+  ungroup()
+
+# Filter
+key_zs <- temp_zs %>%
+  filter(identifier %in% key_metadata$identifier) %>%
+  left_join(key_metadata %>% select(identifier, dose), by = "identifier")
+
+# Add age labels
+# Create donor-specific x labels: "Dose (age y)"
+dose_labels_polio <- key_metadata %>%
+  group_by(donor, dose) %>%
+  summarise(age = round(mean(Age_Years), 1), .groups = "drop") %>%
+  mutate(
+    dose = factor(dose, levels = c("Birth","Pre","Dose 1","Dose 2","Dose 3")),
+    dose_lab = paste0(as.character(dose), " (", age, "y)"),
+    x_key = paste(donor, dose, sep = "___")
+  ) %>%
+  arrange(donor, dose)
+
+# Attach to key_zs
+key_zs <- key_zs %>%
+  left_join(dose_labels_polio %>% select(donor, dose, dose_lab, x_key),
+            by = c("donor","dose")) %>%
+  mutate(
+    x_key = factor(x_key, levels = unique(dose_labels_polio$x_key))
+  )
+
+# Plot 
+temp_peps <- key_zs %>%
+  group_by(id) %>%
+  summarise(n_hits = sum(hit)) %>%
+  filter(n_hits > 0)
+
+Fig_S12_A <- 
+  ggplot(
+  key_zs %>% filter(id %in% temp_peps$id),
+  aes(x = x_key, y = as.factor(id), fill = Z_Bound)
+) +
+  geom_tile() +
+  facet_grid(Poliovirus ~ donor, scales = "free", space = "free") +
+  scale_x_discrete(
+    labels = setNames(dose_labels_polio$dose_lab, dose_labels_polio$x_key)
+  ) +
+  scale_fill_gradientn(
+    "Bounded\nMean\nEBS",
+    colours = c("gray98","#F5C9A9","#F2A26B","#F87E2E")
+  ) +
+  theme_minimal() +
+  theme(
+    text = element_text(family="Helvetica", color = "black", size = 7),
+    axis.text.x = element_text(angle=90, size=7, vjust=0.5, hjust=1, color = "black"),
+    axis.text.y = element_blank(),
+    axis.title = element_text(size=7),
+    legend.title = element_text(size=7),
+    legend.text = element_text(size=7),
+    strip.text = element_text(size=7),
+    axis.ticks.y = element_blank(),
+    legend.position = "none",
+    panel.grid = element_blank(),
+    panel.background = element_blank(),
+    panel.border = element_rect(color="black", fill=NA),
+    strip.text.y.left = element_text(angle=0)
+  ) +
+  xlab("") +
+  ylab("VirScan Peptide") + 
+  annotate(
+    "text",
+    x = Inf,
+    y = Inf,
+    label = "Poliovirus type",
+    hjust = 1.1,
+    vjust = 1.5,
+    angle = -90,
+    size = 8
+  )
+
+Fig_S12_A <- ggdraw() +
+  draw_plot(Fig_S12_A) +
+  draw_label(
+    "Poliovirus",
+    x = 0.99,
+    y = 0.5,
+    angle = -90,
+    fontfamily = "Helvetica",
+    size = 7
+  )
+
+Fig_S12_A
+```
+
+# Rotavirus
+```{r}
+# Identify vaccinated donors and prep data for virus
+temp_donors <- Vaccination_Data %>%
+  filter(species %in% c("Rotavirus A","Rotavirus B")) %>%
+  select(donor, cohort, Sex, Age_Years, Age_Months, Pathogen) %>%
+  distinct() %>%
+  group_by(donor) %>%
+  summarise(n_vaccination = n(), .groups="drop") %>%
+  filter(n_vaccination > 1) %>%
+  pull(donor) %>%
+  unique()
+
+temp_samples <- combined_metadata_dist %>% filter(donor %in% temp_donors)
+
+# keep only donors with at least 3 sampled timepoints
+temp_donors <- temp_samples %>%
+  distinct(donor, identifier) %>%          # important: true sample count, not duplicated rows
+  count(donor, name = "n_samples") %>%
+  filter(n_samples >= 3) %>%
+  pull(donor) %>%
+  unique()
+
+# re-subset samples after filtering donors
+temp_samples <- combined_metadata_dist %>% filter(donor %in% temp_donors)
+
+temp_peptides <- Viral_Annotations %>%
+  filter(species %in% c("Rotavirus A","Rotavirus B")) %>%
+  filter(grepl("Human", Organism))
+
+temp_vaccination <- Vaccination_Data %>%
+  filter(donor %in% temp_donors, species %in% c("Rotavirus A","Rotavirus B")) %>%
+  select(-c(species, Vaccine_Name_English)) %>%
+  distinct() %>%
+  group_by(donor) %>%
+  arrange(Age_Years) %>%
+  mutate(vaccine_dose = as.factor(row_number())) %>%
+  ungroup()
+
+temp_consec_zs <- Birth_Consec_Zs %>% filter(donor %in% temp_donors, id %in% temp_peptides$id)
+
+temp_zs <- all_zs_combined %>%
+  select(c(id, all_of(temp_samples$identifier))) %>%
+  filter(id %in% temp_peptides$id) %>%
+  bound_Z(upper = 15) %>%
+  left_join(Viral_Annotations %>% select(c(id, Entry, `Entry name`, species, `Protein names`, Organism))) %>%
+  pivot_longer(-c(id, Entry, `Entry name`, species, `Protein names`, Organism),
+               names_to = "identifier", values_to = "Z_Bound") %>%
+  mutate(hit = ifelse(Z_Bound >= 3.5, 1, 0)) %>%
+  left_join(temp_samples %>% select(c(identifier, Age_Years, donor)))
+
+# Key timepoints: Birth + Pre (closest before Dose 1) + first sample after each available dose
+
+# Dose 1 age per donor (first recorded vaccination age)
+dose1_age <- temp_vaccination %>%
+  group_by(donor) %>%
+  slice_min(order_by = as.numeric(as.character(vaccine_dose)), n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  transmute(donor, dose1_age = Age_Years)
+
+# Birth sample
+birth <- temp_samples %>%
+  filter(Age_Years == 0) %>%
+  group_by(donor) %>%
+  slice_min(Age_Years, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  mutate(dose = "Birth") %>%
+  select(donor, identifier, Age_Years, dose)
+
+# Pre-vax: closest sample before Dose 1, require >= 6 months (swap to 9/12 if desired)
+pre <- temp_samples %>%
+  left_join(dose1_age, by = "donor") %>%
+  filter(Age_Years < dose1_age) %>%
+  mutate(dist_from_dose1 = abs(Age_Years - dose1_age)) %>%
+  group_by(donor) %>%
+  slice_min(dist_from_dose1, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  filter(Age_Years >= (6/12)) %>%   # >= 6 months
+  mutate(dose = "Pre") %>%
+  select(donor, identifier, Age_Years, dose)
+
+# All post-dose selections: for each donor x dose number, choose closest sample after that dose
+dose_ages <- temp_vaccination %>%
+  mutate(dose_num = as.integer(as.character(vaccine_dose))) %>%
+  select(donor, dose_num, dose_age = Age_Years)
+
+post_candidates <- temp_samples %>%
+  select(donor, identifier, Age_Years) %>%
+  inner_join(dose_ages, by = "donor") %>%
+  filter(Age_Years > dose_age) %>%
+  mutate(dist_after = Age_Years - dose_age) %>%
+  group_by(donor, dose_num) %>%
+  slice_min(dist_after, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  mutate(dose = paste0("Dose ", dose_num)) %>%
+  select(donor, identifier, Age_Years, dose)
+
+key_metadata_raw <- bind_rows(birth, pre, post_candidates) %>%
+  mutate(dose_num = case_when(
+    dose == "Birth" ~ 0L,
+    dose == "Pre"   ~ 0L,   # keep Pre near Birth; we’ll order via factor below
+    str_detect(dose, "^Dose ") ~ as.integer(str_extract(dose, "\\d+")),
+    TRUE ~ NA_integer_
+  ))
+
+# Order levels dynamically based on what exists in your data
+max_dose <- key_metadata_raw %>% summarise(m = max(dose_num, na.rm = TRUE)) %>% pull(m)
+dose_levels <- c("Birth", "Pre", paste0("Dose ", seq_len(max_dose)))
+
+key_metadata_raw <- key_metadata_raw %>%
+  mutate(dose = factor(dose, levels = dose_levels))
+
+# If same identifier is chosen for multiple post-doses, keep only the highest label
+key_metadata <- key_metadata_raw %>%
+  group_by(donor, identifier) %>%
+  slice_max(order_by = as.integer(dose), n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  select(donor, identifier, Age_Years, dose)
+
+# keep only donors with at least 3 sampled timepoints
+temp_donors <- key_metadata %>%
+  distinct(donor, identifier) %>%          # count unique plotted samples per donor
+  count(donor, name = "n_key_samples") %>%
+  filter(n_key_samples >= 3) %>%
+  pull(donor) %>%
+  unique()
+
+# re-subset samples after filtering donors
+temp_samples <- temp_samples %>% filter(donor %in% temp_donors)
+key_metadata <- key_metadata %>% filter(donor %in% temp_donors)
+
+# Join for plotting
+key_zs <- temp_zs %>%
+  filter(identifier %in% key_metadata$identifier) %>%
+  left_join(key_metadata %>% select(identifier, dose), by = "identifier") %>%
+  mutate(dose = factor(dose, levels = dose_levels))
+
+# Donor-specific x-axis labels: "Dose (age y)"
+dose_labels_rota <- key_metadata %>%
+  group_by(donor, dose) %>%
+  summarise(age = round(mean(Age_Years), 1), .groups = "drop") %>%
+  mutate(
+    dose = factor(dose, levels = dose_levels),
+    dose_lab = paste0(as.character(dose), " (", age, "y)"),
+    x_key = paste(donor, dose, sep = "___")
+  ) %>%
+  arrange(donor, dose)
+
+key_zs2 <- key_zs %>%
+  left_join(dose_labels_rota %>% select(donor, dose, dose_lab, x_key),
+            by = c("donor", "dose")) %>%
+  mutate(x_key = factor(x_key, levels = unique(dose_labels_rota$x_key)))
+
+# Plot
+temp_peps <- key_zs2 %>%
+  group_by(id) %>%
+  summarise(n_hits = sum(hit), .groups = "drop") %>%
+  filter(n_hits > 0)
+
+key_zs2 <- key_zs2 %>%
+  mutate(
+    RotaType = case_when(
+      species == "Rotavirus A" ~ "A",
+      species == "Rotavirus B" ~ "B",
+      TRUE ~ species
+    )
+  )
+
+rota_plot <- ggplot(
+  key_zs2 %>% filter(id %in% temp_peps$id),
+  aes(x = x_key, y = as.factor(id), fill = Z_Bound)
+) +
+  geom_tile() +
+  facet_grid(RotaType ~ donor, scales = "free", space = "free") +
+  scale_x_discrete(labels = setNames(dose_labels_rota$dose_lab, dose_labels_rota$x_key)) +
+  scale_fill_gradientn(
+    "Bounded Mean EBS",
+    colours = c("gray98","#FAD0E9","#F58ACF","#FF36B0")
+  ) +
+  ylab("VirScan Peptide") +
+  theme_minimal() +
+  theme(
+    text = element_text(family = "Helvetica",color = "black", size = 7),
+    axis.text.x = element_text(angle = 90, size = 7, vjust = 0.5, hjust = 1, color = "black"),
+    axis.text.y = element_blank(),
+    axis.title = element_text(size = 7),
+    legend.title = element_text(size = 7),
+    legend.text = element_text(size = 7),
+    strip.text = element_text(size = 7),
+    axis.ticks.y = element_blank(),
+    legend.position = "none",
+    panel.grid = element_blank(),
+    panel.background = element_blank(),
+    panel.border = element_rect(color = "black", fill = NA),
+    strip.text.y.left = element_text(angle = 0)
+  ) +
+  xlab("")
+
+Fig_S12_B <- ggdraw() +
+  draw_plot(rota_plot) +
+  draw_label(
+    "Rotavirus",
+    x = 0.99,
+    y = 0.5,
+    angle = -90,
+    fontfamily = "Helvetica",
+    size = 7
+  )
+
+Fig_S12_B
+```
+
+# Create legend and combine figure S12
+```{r, fig.height=7,fig.width=7}
+maxZ<- 15
+legend_breaks <- c(0, 5, 10, maxZ)
+legend_labels <- c("0", "5", "10", as.character(maxZ))
+
+legend_polio <- ggplot(legend_df, aes(x = z, y = y, fill = meas_hex)) +
+  geom_tile(height = 0.9) +
+  annotate("text", x = maxZ * 0.5, y = 1, label = "Polio",
+           family = "Helvetica", size = 2.5,  color = "black") +
+  scale_fill_identity() +
+  scale_x_continuous(breaks = legend_breaks, labels = legend_labels, expand = c(0, 0)) +
+  theme_minimal() +
+  theme(
+    text = element_text(family = "Helvetica", color = "black", size = 7),
+    axis.title.x = element_blank(),
+    axis.text.x  = element_text(size = 7, color = "black"),
+    axis.ticks.x = element_line(linewidth = 0.3, color = "black"),
+    axis.title.y = element_blank(),
+    axis.text.y  = element_blank(),
+    axis.ticks.y = element_blank(),
+    panel.grid   = element_blank(),
+    plot.margin  = margin(t = 0, r = 4, b = 0, l = 4)
+  )
+
+legend_rota <- ggplot(legend_df, aes(x = z, y = y, fill = rub_hex)) +
+  geom_tile(height = 0.9) +
+  annotate("text", x = maxZ * 0.5, y = 1, label = "Rotavirus",
+           family = "Helvetica", size = 2.5,  color = "black") +
+  scale_fill_identity() +
+  scale_x_continuous(breaks = legend_breaks, labels = legend_labels, expand = c(0, 0)) +
+  theme_minimal() +
+  theme(
+    text = element_text(family = "Helvetica", color = "black", size = 7),
+    axis.title.x = element_blank(),
+    axis.text.x  = element_text(size = 7, color = "black"),
+    axis.ticks.x = element_line(linewidth = 0.3, color = "black"),
+    axis.title.y = element_blank(),
+    axis.text.y  = element_blank(),
+    axis.ticks.y = element_blank(),
+    panel.grid   = element_blank(),
+    plot.margin  = margin(t = 0, r = 4, b = 0, l = 4)
+  )
+
+legend_title <- ggplot() +
+  annotate("text", x = 0.5, y = 0.5, label = "Bounded Mean EBS",
+           family = "Helvetica", size = 3, fontface = "plain", color = "black") +
+  theme_void() +
+  theme(plot.margin = margin(t = 0, r = 0, b = 0, l = 0))
+
+top_legends <- cowplot::plot_grid(
+  legend_polio + theme(plot.margin = margin(0, 5, 0, 0)),
+  legend_rota + theme(plot.margin = margin(0, 0, 0, 5)),
+  ncol = 2,
+  rel_widths = c(1, 1)
+)
+
+panel_top <- cowplot::plot_grid(
+  legend_title,
+  top_legends,
+  ncol = 1,
+  rel_heights = c(0.35, 1)
+)
+
+ggarrange(
+  ggarrange(
+    ggplot(NULL) + theme_void(),
+    panel_top,
+    ggplot(NULL) + theme_void(),
+    widths = c(0.75, 18, 0.75),
+    nrow = 1
+  ),
+  Fig_S12_A,
+  Fig_S12_B,
+  labels = c("a", "", "b"),
+  ncol = 1,
+  font.label = list(family = "Helvetica", size = 8),
+  heights = c(0.12, 1, 0.8)
+)
+ggsave(file=paste0(folder_path_save, "/AVARS_Figure_S12_Final.pdf"))
+dev.off()
+```

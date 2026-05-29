@@ -1,0 +1,195 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+```{r}
+# Load packages
+easypackages::libraries(c("readr","readxl","dplyr","tidyr","ggplot2","ggpubr","UpSetR","cowplot","grid","ggplotify","data.table","plotROC","pROC","lme4", "splines","emmeans","tidytext"))
+
+# insert path to folders
+directory_path <- "" # CHANGE THIS to path to director enclosing code and data sets
+folder_path <- paste0(directory_path, "/Supplemental Tables/") # folder containing downloaded data sets
+intermediate_folder_path <- paste0(directory_path, "/Intermediate Files Used in Plots/") # path containing intermediate outputs
+folder_path_save <- paste0(directory_path, "/Complete Figures/")# define folder path to save images to
+folder_path_code <- paste0(directory_path, "/Functions and General Analysis Code/") # change this to folder containing downloaded functions and code
+
+# Load Supplemental Data
+combined_metadata_dist <- read_csv(paste0(folder_path,"Data Table S1.csv"))
+all_zs_combined <- read_csv(paste0(folder_path,"Data Table S2.csv"))
+all_hits_combined <- read_csv(paste0(folder_path,"Data Table S3.csv"))
+Viral_Annotations <- read_csv(paste0(folder_path,"Data Table S4.csv"))
+
+# Load Intermediate data
+Z_fam_cor_combined <- read_csv(paste0(intermediate_folder_path,"Viral_Family_Autocorrelation_Relative_to_initial_samples_by_age.csv"))  # Data frame used was generated in the script "Generate Viral Family Correlation Trajectories.R"
+adult_Consec_Zs <- read_csv(paste0(intermediate_folder_path,"Adult_Consec_Zs.csv")) # Data frame used was generated in the script "Generate Consecutive Z Score Files.R"
+ped_5_Zs <- read_csv(paste0(intermediate_folder_path,"Ped_5_apart_Zs.csv")) # Data frame used was generated in the script "Generate Consecutive Z Score Files.R"
+pal1<-c("#F87E2E", "#FFEC33", "#1FAA79", "#14C4F8", "#0077C8", "#9870F5", "#D53EE1", "#FF36B0", "#D72638", "#6E6E6E")
+source(paste0(folder_path_code,"Immunoprint functions.R"))
+```
+
+# Prepare Data
+Initial consecutive Z Scores files were created in "Generate Consecutive Z Score Files.R"
+```{r}
+adult_Consec_Zs<-adult_Consec_Zs %>% mutate(time_interval=Age_Years_2-Age_Years_1)
+# limit to 4-6 years apart, prioritizing closest to 5 years
+adult_Consec_Zs<-adult_Consec_Zs  %>% filter(time_interval>=4,time_interval<=6) %>% mutate(dist_from_5=abs(time_interval-5))%>% group_by(donor,id) %>% arrange(dist_from_5) %>% slice_head(n=1) %>% ungroup() # limit to one observation per donor 4-6 years apart
+length(unique(adult_Consec_Zs$donor)) # number of donors = 56
+consec_adult_for_jaccard<-adult_Consec_Zs %>% filter(Hit_1==1)
+rm(adult_Consec_Zs)
+```
+
+Relationship between Z Score and stability
+```{r,fig.height=7,fig.width=7.24}
+Fig_S5_A<-ggplot(consec_adult_for_jaccard) +
+  geom_point(aes(x = Z_1, y = Z_2), color = pal1[3], alpha = 0.5) +
+  geom_smooth(aes(x = Z_1, y = Z_2), method = "lm", se = FALSE, color = "black") +
+  stat_cor(aes(x = Z_1, y = Z_2), method = "pearson", label.x.npc = "left", label.y.npc = "top",size = 3) +
+  theme_minimal() +
+  theme(text=element_text(family="Helvetica", size = 7),
+        panel.grid = element_blank(),
+        axis.title = element_text(size = 7),
+        legend.position = "top") +
+  xlab("Adult EBS at Baseline") +
+  ylab("Adult EBS 4-6\nyears later") 
+# Inital Z > x, whether it will be there
+summary(glm(Hit_2~Z_1,family = binomial, data=consec_adult_for_jaccard))
+pred_probs <- predict(glm(Hit_2~Z_1,family = binomial, data=consec_adult_for_jaccard), type = "response")
+roc_obj <- pROC::roc(consec_adult_for_jaccard$Hit_2, pred_probs)
+plot(roc_obj)
+
+ggplot(consec_adult_for_jaccard, aes(d = Hit_2, m = pred_probs)) + 
+    geom_roc()+coord_equal()+xlab("Specificity")+ylab("Sensitivity")
+ggplot(consec_adult_for_jaccard, aes(d = Hit_2, m = Z_1)) + 
+    geom_roc()+coord_equal()+xlab("Specificity")+ylab("Sensitivity")+ theme(panel.grid = element_blank(),axis.title = element_text(size=7),legend.position = "top")
+
+roc_obj2<-pROC::roc(consec_adult_for_jaccard$Hit_2, consec_adult_for_jaccard$Z_1)
+
+coords(roc_obj2, "local maximas", ret = c("threshold", "sensitivity", "specificity","accuracy")) # 6.556995 maximizes accuracy
+
+model <- glm(Hit_2 ~ Z_1, family = binomial, data = consec_adult_for_jaccard)
+
+# Create new data for predictions: generate 100 values of Z_1 spanning its observed range
+newdata <- data.frame(Z_1 = seq(min(consec_adult_for_jaccard$Z_1),
+                                  max(consec_adult_for_jaccard$Z_1),
+                                  length.out = 100))
+
+# Get predicted probabilities from the model
+newdata$predicted_prob <- predict(model, newdata = newdata, type = "response")
+
+# Plot with ggplot2
+Fig_S5_B<-ggplot() +
+  # Plot the predicted probability curve
+  geom_line(data = newdata, aes(x = Z_1, y = predicted_prob), color = pal1[6], size = 1.5) +
+  # +
+  labs(x = "EBS at Baseline", y = "Probability of being\ntargeted 4-6 years later") +
+  theme_minimal()+ theme(text=element_text(family="Helvetica", size = 7),panel.grid = element_blank(),axis.title = element_text(size=7),panel.border = element_rect(color = "black",fill = NA),panel.background = element_blank())+scale_x_continuous(trans = "log2",
+                     breaks = c(2, 4, 8, 16, 32, 64, 128, 1024),
+                     labels = c("2", "4", "8", "16", "32", "64", "128", "1024"))
+Fig_S5_B
+```
+
+# Figure Ex Dat 2C
+# Prepare data for Figure Ex Dat 2C
+Jaccard distances for each age group
+For each age group, only compute for peptides targeted by at least 5 donors and 20% of the group at baseline
+```{r}
+# Adult
+temp<-consec_adult_for_jaccard %>% group_by(id) %>% summarise(n_donors_targeting=n()) %>% mutate(prop_targeting=n_donors_targeting/56) %>% ungroup() %>% filter(n_donors_targeting>=5,prop_targeting>=0.2) #  1353 peptides meet criteria
+jaccard_1_5<-consec_adult_for_jaccard %>% filter(id %in% temp$id)%>% group_by(id) %>% summarise(hit_jaccard=jaccard::jaccard(Hit_1,Hit_2)) %>% left_join(Viral_Annotations %>% select(c(id,species,`Protein names`,public_epitope_2015,family_label)))
+
+# Four year olds
+four_Consec_Zs<-ped_5_Zs %>% mutate(time_interval=abs(Age_Years_2-Age_Years_1)) %>% ungroup%>% filter(Age_Years_1>3, Age_Years_1<5, time_interval>=4,time_interval<=6) %>% mutate(dist_from_4=abs(Age_Years_1-4), dist_from_5=abs(time_interval-5)) %>% group_by(donor,id) %>% arrange(dist_from_4, dist_from_5) %>% slice_head(n=1) %>% ungroup() %>% select(-c(dist_from_4,dist_from_5)) # limit to one observation per donor 4-6 years apart
+consec_four_for_jaccard <- four_Consec_Zs %>% filter(Hit_1==1)
+temp<-consec_four_for_jaccard %>% group_by(id) %>% summarise(n_donors_targeting=n())  %>% mutate(prop_targeting=n_donors_targeting/17)%>% ungroup() %>% filter(n_donors_targeting>=5, prop_targeting>=0.2) # 1846 peptides meet criteria
+jaccard_1_5_four<-consec_four_for_jaccard %>% filter(id %in% temp$id)%>% group_by(id) %>% summarise(hit_jaccard=jaccard::jaccard(Hit_1,Hit_2)) %>% left_join(Viral_Annotations %>% select(c(id,species,`Protein names`,public_epitope_2015,family_label)))
+rm(four_Consec_Zs)
+
+# One year olds
+one_Consec_Zs<-ped_5_Zs %>% mutate(time_interval=abs(Age_Years_2-Age_Years_1)) %>% ungroup%>% filter(Age_Years_1>=0.8,Age_Years_1<=1.5, time_interval>=4,time_interval<=6) %>% mutate(dist_from_1=abs(Age_Years_1-1), dist_from_5=abs(time_interval-5)) %>% group_by(donor,id) %>% arrange(dist_from_1, dist_from_5) %>% slice_head(n=1) %>% ungroup() %>% select(-c(dist_from_1,dist_from_5)) # limit to one observation per donor 4-6 years apart
+consec_one_for_jaccard <- one_Consec_Zs %>% filter(Hit_1==1)
+temp<-consec_one_for_jaccard %>% group_by(id) %>% summarise(n_donors_targeting=n())  %>% mutate(prop_targeting=n_donors_targeting/14) %>% ungroup() %>% filter(n_donors_targeting>=5,prop_targeting>=0.2) # 1051 peptides meet criteria
+jaccard_1_5_one<-consec_one_for_jaccard %>% filter(id %in% temp$id)%>% group_by(id) %>% summarise(hit_jaccard=jaccard::jaccard(Hit_1,Hit_2)) %>% left_join(Viral_Annotations %>% select(c(id,species,`Protein names`,public_epitope_2015,family_label)))
+rm(one_Consec_Zs)
+
+# Combine
+combined_jaccard <- jaccard_1_5_one %>% mutate(facet_label="One year olds") %>% bind_rows(jaccard_1_5_four %>% mutate(facet_label="Four year olds"))%>% bind_rows(jaccard_1_5 %>% mutate(facet_label="Adults"))
+head(combined_jaccard)
+```
+
+# Panel
+```{r}
+s5c_dat <- combined_jaccard %>%
+  filter(facet_label != "Four year olds") %>%
+  mutate(
+    facet_label = ifelse(facet_label == "One year olds", "One-year-olds", facet_label),
+    label_pub = ifelse(public_epitope_2015 == TRUE, "Public", "Private")
+  )
+
+# Exact two-sided Wilcoxon rank-sum P values for each facet
+s5c_pvals <- s5c_dat %>%
+  group_by(facet_label) %>%
+  summarise(
+    p_value = wilcox.test(
+      hit_jaccard ~ label_pub,
+      data = cur_data(),
+      alternative = "two.sided",
+      exact = FALSE
+    )$p.value,
+    .groups = "drop"
+  ) %>%
+  mutate(
+    p_label = ifelse(
+      p_value < 2.2e-16,
+      "P < 2.2e-16",
+      paste0("P = ", signif(p_value, 3))
+    )
+  )
+
+s5c_pvals
+Fig_S5_C <- ggplot(
+  s5c_dat,
+  aes(x = label_pub, y = hit_jaccard)
+) +
+  geom_violin(alpha = 0.9, aes(fill = facet_label)) +
+  geom_signif(
+    data = s5c_pvals,
+    aes(
+      xmin = "Public",
+      xmax = "Private",
+      annotations = p_label,
+      y_position = 1.05
+    ),
+    manual = TRUE,
+    inherit.aes = FALSE,
+    textsize = 2.2,
+    tip_length = 0.01
+  ) +
+  ylab("Proportion of individuals\ntargeting peptide 4-6 years later") +
+  theme_minimal() +
+  theme(
+    text = element_text(family = "Helvetica", size = 7),
+    axis.title.x = element_blank(),
+    axis.title.y = element_text(size = 7),
+    axis.text = element_text(size = 7),
+    axis.text.x = element_text(angle = 45),
+    strip.text = element_text(size = 7),
+    panel.grid = element_blank(),
+    legend.position = "none"
+  ) +
+  facet_wrap(~facet_label) +
+  scale_fill_manual(name = "", values = c(pal1[c(5, 8)])) +
+  scale_y_continuous(limits = c(0, 1.1), breaks = c(0, 0.5, 1))
+
+Fig_S5_C
+```
+
+
+# Figure S5 Combined
+```{r,fig.width=7,fig.height=2.5}
+ggarrange(Fig_S5_A,Fig_S5_B,Fig_S5_C, nrow = 1,widths = c(1,1,1),labels=c("a","b","c"),font.label = list(family="Helvetica",size=8))
+ggsave(file=paste0(folder_path_save, "/AVARS_Figure_S5_Final.pdf"))
+dev.off
+```
+

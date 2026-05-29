@@ -1,0 +1,751 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+easypackages::libraries(c("readr","readxl","dplyr","tidyr","ggplot2","ggpubr","UpSetR","cowplot","grid","ggplotify"))
+
+# insert path to folders
+directory_path <- "" # CHANGE THIS to path to director enclosing code and data sets
+folder_path <- paste0(directory_path, "/Supplemental Tables/") # folder containing downloaded data sets
+intermediate_folder_path <- paste0(directory_path, "/Intermediate Files Used in Plots/") # path containing intermediate outputs
+folder_path_save <- paste0(directory_path, "/Complete Figures/")# define folder path to save images to
+folder_path_code <- paste0(directory_path, "/Functions and General Analysis Code/") # change this to folder containing downloaded functions and code
+
+# Load Supplemental Data
+combined_metadata_dist <- read_csv(paste0(folder_path,"Data Table S1.csv"))
+all_zs_combined <- read_csv(paste0(folder_path,"Data Table S2.csv"))
+all_hits_combined <- read_csv(paste0(folder_path,"Data Table S3.csv"))
+Viral_Annotations <- read_csv(paste0(folder_path,"Data Table S4.csv"))
+IgG_Data <- read_csv(paste0(folder_path,"Data Table S6.csv"))
+Birth_Consec_Zs <- read_csv(paste0(intermediate_folder_path,"Birth_Consec_Zs.csv")) # Generated in "Generate Consecutive Z Score Files.R"
+Dat_5D <- read_csv(paste0(intermediate_folder_path,"circle_plot_data_figure_5.csv")) # Generated in "Generate Circle Plot Data.R"
+virus_key_5D <- read_csv(paste0(intermediate_folder_path,"virus_key_figure_5.csv")) # Generated in "Generate Circle Plot Data.R"
+
+
+# Load custom functions
+source(paste0(folder_path_code,"Immunoprint functions.R"))
+
+pal1<-c("#F87E2E", "#FFEC33", "#1FAA79", "#14C4F8", "#0077C8", "#9870F5", "#D53EE1", "#FF36B0", "#D72638", "#6E6E6E")
+```
+
+# Sample Size for each age group
+```{r}
+IgG_Data %>% select(c(interval_label,time_interval,donor)) %>% distinct() %>% group_by(interval_label) %>% summarise(samp_size=max(row_number()))
+```
+# Figure 5A
+```{r}
+# Convert from mg/cL to mg/DL
+ Fig5A <- ggplot(IgG_Data, mapping = aes(x = time_interval, y = IgG_conc*10)) +
+  stat_boxplot(mapping = aes(group = time_interval), outlier.shape = NA,color=pal1[3],fill=pal1[3],alpha=0.5) +
+  geom_line(size = 0.1, mapping = aes(group = donor)) +
+  geom_point(size = 0.3, position = position_dodge(width = 0.1)) +
+  theme_minimal()+theme(text=element_text(family = "Helvetica", size = 7),panel.grid = element_blank(),panel.border = element_rect(color="black",fill=NA),axis.text = element_text(size=7),axis.title = element_text(size=7)) + xlab("Age (years)") +ylab("IgG concentration\n(mg/dL)")
+
+Fig5A
+IgG_Data %>% select(donor) %>% distinct()
+```
+
+# Figure 5B
+```{r}
+ total_hits <- all_hits_combined %>% select(c(id,all_of(IgG_Data$identifier))) %>% pivot_longer(-id,names_to = "identifier",values_to = "hit") %>% left_join(IgG_Data %>% select(c(identifier,donor,time_interval,Age_Years))) %>% group_by(identifier,donor,time_interval,Age_Years) %>% summarise(num_hits=sum(hit),.groups="drop")
+
+Fig5B <- ggplot(total_hits, mapping = aes(x = time_interval, y = num_hits)) + 
+  stat_boxplot(mapping = aes(group = time_interval), outlier.shape = NA,color=pal1[8],fill=pal1[8],alpha=0.5) +
+  geom_line(size = 0.1, mapping = aes(group = donor)) +
+  geom_point(size = 0.3, position = position_dodge(width = 0.1)) +theme_minimal()+theme(text=element_text(family = "Helvetica", size=7), panel.grid = element_blank(),panel.border = element_rect(color="black",fill=NA),axis.text = element_text(size=7),axis.title = element_text(size=7)) + labs(x = "Age (years)", y = "Total number of hits")
+Fig5B
+```
+
+# Prepare data for 5C
+```{r}
+## maternal criteria: present at birth and within 1 yr and constantly decreasing
+Mat_end_hits<-all_hits_combined %>% select(c(id,all_of(IgG_Data$identifier))) %>% pivot_longer(-id,names_to = "identifier",values_to = "hit") %>% left_join(IgG_Data %>% select(c(identifier,donor,time_interval,Age_Years, age_group, interval_label))) %>% left_join(all_zs_combined %>% select(c(id,all_of(IgG_Data$identifier))) %>% pivot_longer(-id,names_to = "identifier",values_to = "zscore")) %>% mutate(trunc_zscore=ifelse(zscore<3.5,3.5,zscore))%>% mutate(trunc_zscore=ifelse(zscore>15,15,trunc_zscore))
+
+
+# select only individual + id for which there is a hit at birth
+present_at_birth <- filter(Mat_end_hits, Age_Years == 0, hit == 1) %>%
+  mutate(indiv_id_key = paste(donor, id)) %>%
+  select(c(indiv_id_key))
+
+# all possible trajectories
+keep_maternal <- c("maternal_maternal_maternal_maternal", 
+                   "maternal_missing_maternal_maternal")
+
+rm_after_0 <- c("maternal_not maternal_maternal_maternal", 
+                "maternal_not maternal_maternal_not maternal", 
+                "maternal_not maternal_not maternal_maternal",
+                "maternal_not maternal_not maternal_not maternal",
+                "maternal_not maternal_missing_maternal",
+                "maternal_not maternal_missing_not maternal",
+                "maternal_missing_not maternal_maternal",
+                "maternal_missing_not maternal_not maternal")
+
+rm_after_1 <- c("maternal_maternal_not maternal_maternal", 
+                "maternal_maternal_not maternal_not maternal",
+                "maternal_maternal_missing_not maternal",
+                "maternal_maternal_missing_maternal")
+
+rm_after_2 <- c("maternal_maternal_maternal_not maternal", 
+                "maternal_missing_maternal_not maternal")
+
+# label epitopes
+maternal_hits <- Mat_end_hits %>%
+  filter(paste(donor, id) %in% present_at_birth$indiv_id_key, 
+           # select only those epitopes present at birth
+         time_interval <= 1) %>%  # select only timepoints less than 1yr
+  mutate(key = paste(donor, time_interval, id)) %>%
+  group_by(donor, id) %>%
+  arrange(Age_Years) %>%
+  mutate(delta_zscore = c(0, diff(zscore)), 
+           # get difference from timepoint to timepoint to see whether z score is decreasing or increasing
+         maternal = case_when(
+           Age_Years == 0 ~ "maternal",
+           hit == 1 & delta_zscore <= 0 ~ "maternal", 
+           hit == 0 ~ "not maternal",
+           hit == 1 & delta_zscore > 0 ~ "not maternal"
+           # maternal antibodies: enriched at birth and declining afterwards
+         )) %>%  
+  select(-c(Age_Years, zscore, age_group, trunc_zscore, hit, delta_zscore, key, interval_label,identifier)) %>%
+  pivot_wider(names_from = time_interval, values_from = maternal, values_fill = "missing") %>%
+  mutate(trajectory = paste(`0`, `0.25`, `0.5`, `1`, sep = "_"),
+         rm = case_when(
+           trajectory %in% keep_maternal ~ "keep_maternal",
+           trajectory %in% rm_after_0 ~ "rm_after_0",
+           trajectory %in% rm_after_1 ~ "rm_after_1",
+           trajectory %in% rm_after_2 ~ "rm_after_2")) %>%
+  pivot_longer(cols = c(`0`, `0.25`, `0.5`, `1`), names_to = "time_interval", values_to = "maternal") %>%
+  mutate(maternal = case_when(
+    time_interval == 0 ~ "maternal",
+    rm == "keep_maternal" ~ "maternal",
+    rm == "rm_after_0" & time_interval > 0 ~ "not maternal",
+    rm == "rm_after_1" & time_interval > 0.25 ~ "not maternal",
+    rm == "rm_after_1" & time_interval <= 0.25 ~ "maternal",
+    rm == "rm_after_2" & time_interval > 0.5 ~ "not maternal",
+    rm == "rm_after_2" & time_interval <= 0.5 ~ "maternal"),
+    key = paste(donor, time_interval, id))
+                     
+maternal_hits_key <- filter(maternal_hits, maternal == "maternal")$key
+```
+# Figure 5C
+```{r}
+total_hits_by_maternal <- Mat_end_hits %>% 
+  mutate(key = paste(donor, time_interval, id),
+         maternal = ifelse(key %in% maternal_hits_key, "maternal", "endogenous")) %>%
+  group_by(donor, Age_Years, time_interval, maternal) %>%
+  summarise(num_hits = sum(hit))
+
+Fig5C <- ggplot(total_hits_by_maternal, aes(x = time_interval, y = num_hits)) +
+  geom_line(mapping = aes(group = paste(donor, maternal), color = maternal), size = 0.2) +
+  scale_color_manual(name="Antibody source",values=c(pal1[4],pal1[7])) +
+  labs(x = "Age (years)",
+       y = "Total number of hits") +theme_minimal()+theme(text=element_text(family = "Helvetica", size = 7),panel.grid = element_blank(),panel.border = element_rect(color="black",fill=NA),legend.position = c(0.75, 0.12),legend.text = element_text(size=7,margin = margin(b = 0)),legend.spacing.y  = unit(0.2, "lines"),legend.key.height = unit(0.3, "lines"),legend.title = element_text(size=7,margin = margin(b = 0)),axis.text = element_text(size=7),axis.title = element_text(size=7))
+
+Fig5C
+```
+
+# Prepare Data for Figures 5E-F
+Determine the time of first hit for each epitope in each individual  
+```{r determine time of first hit}
+# time point at which an epitope was first hit
+first_timepoint <- Mat_end_hits %>%
+  group_by(donor, id) %>%
+  filter(trunc_zscore > 3.5) %>%
+  summarise(first_age = min(Age_Years),
+            first_interval = min(time_interval),
+            .groups = "drop") %>% 
+  ungroup() %>% 
+  mutate(first_interval_label = case_when(
+    first_interval == 0    ~ "birth",
+    first_interval == 0.25 ~ "3mo",
+    first_interval == 0.5  ~ "6mo",
+    first_interval == 1    ~ "1yr",
+    first_interval == 1.5  ~ "1.5yr",
+    first_interval == 2    ~ "2yr",
+    first_interval == 3    ~ "3yr"),
+    first_interval_label = factor(first_interval_label, 
+                                  levels = c("birth", "3mo", "6mo", "1yr", 
+                                             "1.5yr", "2yr", "3yr"))) %>% 
+  arrange(id, donor)
+
+zscores <- inner_join(Mat_end_hits, first_timepoint,
+                      by = c("id", "donor"))
+
+```
+
+
+We next categorize all peptide reactivity data according to its change from the previous time points  
+
+- maternal:               hit == 1 & time_interval == 0  
+- endogenous:             hit == 1 & time_interval == first_interval & time_interval != 0  
+- sustained hit increase: hit == 1 & prev_hit == TRUE & delta_zscore > 0  
+- sustained hit decrease: hit == 1 & prev_hit == TRUE & delta_zscore <= 0  
+- boost:                  hit == 1 & prev_hit == FALSE  
+- not hit yet:            hit == 0 & time_interval < first_interval  
+- loss:                   hit == 0 & time_interval > first_interval & prev_hit == TRUE  
+- sustained loss:         hit == 0 & time_interval > first_interval & prev_hit == FALSE  
+
+```{r categorize epitope dynamics by its change from the last time point}
+zscores <- zscores %>% 
+  group_by(id, donor) %>%
+  arrange(Age_Years) %>% 
+  mutate(
+    prev_hit = dplyr::lag(hit),
+    delta_zscore = c(0, diff(zscore)), 
+    hit_type = case_when(
+      hit == 1 & time_interval == 0                                                    ~ "maternal", 
+      hit == 1 & time_interval != 0 & time_interval == first_interval                  ~ "endogenous",
+      hit == 1 & time_interval > first_interval & prev_hit == TRUE & delta_zscore > 0  ~ "sustained hit increasing",
+      hit == 1 & time_interval > first_interval & prev_hit == TRUE & delta_zscore <= 0 ~ "sustained hit decreasing",
+      hit == 1 & time_interval > first_interval & prev_hit == FALSE                    ~ "boost",
+      hit == 0 & time_interval < first_interval                                        ~ "not hit yet",
+      hit == 0 & time_interval > first_interval & prev_hit == TRUE                     ~ "loss",
+      hit == 0 & time_interval > first_interval & prev_hit == FALSE                    ~ "sustained loss"
+    )) %>% 
+  mutate(hit_label = case_when(
+        hit_type == "maternal"                 ~ "maternal",
+        hit_type == "endogenous"               ~ "endogenous",
+        hit_type == "loss"                     ~ "loss",
+        hit_type == "sustained loss"           ~ "loss",
+        hit_type == "sustained hit decreasing" ~ "decline",
+        hit_type == "boost"                    ~ "boost",
+        hit_type == "sustained hit increasing" ~ "boost",
+        hit_type == "not hit yet"              ~ "not hit yet"
+      )) %>% 
+  ungroup() %>% 
+  arrange(id, donor, Age_Years)
+table(zscores$hit_type, useNA = "always")
+zscores %>% head()
+```
+
+# Figure S7
+Characterize identify of peptides targeted at birth and later targeted by endogenous response
+```{r, fig.width=7, fig.height=4}
+# Per-sample data for plotting
+targ_at_birth_hits_plot <- zscores %>%
+  filter(first_interval_label == "birth", hit == 1, time_interval >= 1) %>%
+  left_join(Viral_Annotations %>% select(id, species, family_label), by = "id") %>%
+  group_by(identifier, donor, Age_Years, interval_label, species, family_label) %>%
+  summarise(n_peps = n(), .groups = "drop")
+
+# Summary table
+targ_at_birth_hits_summary <- targ_at_birth_hits_plot %>%
+  group_by(species, interval_label, family_label) %>%
+  summarise(
+    med_peps_targ = median(n_peps),
+    iqr_lower = quantile(n_peps, 0.25),
+    iqr_upper = quantile(n_peps, 0.75),
+    min_peps = min(n_peps),
+    max_peps = max(n_peps),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(med_peps_targ))
+
+temp_viruses <- targ_at_birth_hits_summary %>%
+  group_by(species) %>%
+  summarise(max_med = max(med_peps_targ), .groups = "drop") %>%
+  filter(max_med >= 5) %>%
+  pull(species)
+
+targ_at_birth_hits_plot <- targ_at_birth_hits_plot %>%
+  filter(species %in% temp_viruses)
+
+targ_at_birth_hits_summary <- targ_at_birth_hits_summary %>%
+  filter(species %in% temp_viruses)
+
+# Order species by median value at 3 years
+species_order <- targ_at_birth_hits_summary %>%
+  filter(interval_label == "3yr") %>%
+  arrange(med_peps_targ) %>%
+  pull(species)
+
+targ_at_birth_hits_plot <- targ_at_birth_hits_plot %>%
+  mutate(
+    species = factor(species, levels = species_order)
+  )
+
+targ_at_birth_hits_summary <- targ_at_birth_hits_summary %>%
+  mutate(
+    species = factor(species, levels = species_order)
+  )
+
+# Build facet labels as age (n=number of unique identifiers)
+facet_labs <- targ_at_birth_hits_plot %>%
+  group_by(interval_label) %>%
+  summarise(n_ids = n_distinct(identifier), .groups = "drop") %>%
+  mutate(
+    interval_label_facet = paste0(interval_label, " (n=", n_ids, ")")
+  )
+
+facet_levels <- c("1yr", "1.5yr", "2yr", "3yr")
+facet_label_map <- setNames(
+  facet_labs$interval_label_facet[match(facet_levels, facet_labs$interval_label)],
+  facet_levels
+)
+
+targ_at_birth_hits_plot <- targ_at_birth_hits_plot %>%
+  mutate(
+    interval_label = factor(interval_label, levels = facet_levels, labels = facet_label_map[facet_levels])
+  )
+
+targ_at_birth_hits_summary <- targ_at_birth_hits_summary %>%
+  mutate(
+    interval_label = factor(interval_label, levels = facet_levels, labels = facet_label_map[facet_levels])
+  )
+
+# Define colors to be consistent with figure 4
+fam_levels <- c(
+  "Herpesviridae",
+  "Picornaviridae",
+  "Orthomyxoviridae",
+  "Pneumoviridae",
+  "Adenoviridae",
+  "Coronaviridae",
+  "Paramyxoviridae",
+  "Other"
+)
+
+family_cols <- setNames(
+  pal1[c(1, 3:8, 10)],
+  fam_levels
+)
+
+# Plot
+ggplot(targ_at_birth_hits_plot, aes(x = species, y = n_peps, colour = family_label)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter(width = 0.2, alpha = 0.2, size = 0.8) +
+  facet_grid(~ interval_label) +
+  coord_flip() +
+  theme_bw() +
+  ylab("Number of maternal-endogenous shared peptide responses by age") +
+  theme(
+    text = element_text(family = "Helvetica",size = 7),
+    strip.placement = "outside",
+    strip.background = element_blank(),
+    strip.text = element_text(size = 7),
+    panel.spacing.y = unit(10, "pt"),
+    axis.title.y = element_blank(),
+    axis.text = element_text(size = 7, color = "black"),
+    axis.title.x = element_text(size = 7),
+    legend.text = element_text(size = 7, color = "black"),
+    legend.title = element_text(size = 7),
+    panel.grid = element_blank()
+  ) +
+  ggplot2::scale_color_manual(
+    values = family_cols,
+    breaks = fam_levels,
+    name = "Viral family"
+  )
+ggsave(file=paste0(folder_path_save, "/AVARS_Figure_S7_Final.pdf"))
+dev.off()
+```
+
+
+Composition and change of viral peptide reactivities by time of first appearance  
+All R objects are named with prefix "hit_dynamic_"  
+
+We first categorized each peptide hit as either "retained", "lost", or "gained" from the last time point. We then summarized the number of peptides belonging to each type at each time point for each individual. To then summarize over all 26 individuals, we use the median number of hits for each category.  
+We performed such analyses for all viruses combined and for each major virus groups.  
+
+```{r positive and negative change in number of epitope hits by each individual}
+hit_change_by_ind <- zscores %>% 
+  group_by(donor, id) %>% 
+  mutate(hit_change = case_when(
+    interval_label == "birth" & hit == 0 ~ "not hit",
+    interval_label == "birth" & hit == 1 ~ "maternal",
+    hit - lag(hit) == 0 & hit == 0 ~ "not hit",
+    hit - lag(hit) == 0 & hit == 1 ~ "retain",
+    hit - lag(hit) == 1  ~ "gain",
+    hit - lag(hit) == -1 ~ "loss"
+  )) %>% 
+  group_by(donor, 
+           first_age, first_interval, first_interval_label,
+           Age_Years, time_interval, interval_label) %>% 
+  summarise(n = n(),
+            n_hit = sum(hit), 
+            gain_hit = sum(hit_change == "gain"),
+            loss_hit = sum(hit_change == "loss"),
+            retain_hit = sum(hit_change == "retain"),
+            diff_hit = n_hit - retain_hit,
+            .groups = "drop")
+
+hit_change_ind_median <- hit_change_by_ind %>%
+  group_by(first_interval, first_interval_label, time_interval, interval_label) %>%
+  summarise(n          = median(n), 
+            n_hit      = median(n_hit), 
+            gain_hit   = median(gain_hit),
+            loss_hit   = median(loss_hit),
+            retain_hit = median(retain_hit),
+            diff_hit   = median(diff_hit), 
+            .groups    = "drop")
+hit_change_by_ind %>% select(donor) %>% distinct()
+```
+
+Stacked barplot shows the composition and change of peptide hits across time points.  
+Each colored section within a bar represent the median number of hits across all 26 individuals.  
+```{r composed figure that show composition, gain and lost, fig.height = 9.5, fig.width = 7.5}
+hit_change_ind_median_barplot_data <- hit_change_ind_median %>% 
+  mutate(loss_hit = -loss_hit) %>% 
+  select(first_interval_label, interval_label, n_hit, gain_hit, loss_hit) %>% 
+  pivot_longer(cols = c("n_hit", "gain_hit", "loss_hit"),
+               names_to = "type", values_to = "n_hit") %>% 
+  mutate(type = ordered(type, 
+                        levels = c("n_hit", "gain_hit", "loss_hit"), 
+                        labels = c("Number of total hits\n(median)", "New hits\n(median)", "Lost hits\n(median)"))) 
+
+
+
+Fig5E<-ggplot(hit_change_ind_median_barplot_data %>% filter(type=="Number of total hits\n(median)"),aes(x = factor(interval_label,levels = c("birth", "3mo", "6mo", "1yr", 
+                                             "1.5yr", "2yr", "3yr")), y = n_hit, fill = first_interval_label))  + 
+  geom_bar(stat = "identity", position = "stack", color = "black",alpha=0.7) + 
+  scale_fill_manual(name = "Age at\nfirst hit", values=c(pal1[2:8])) +
+  facet_grid(type ~ ., scales = "free_y", space = "free_y", switch = "y") +
+  scale_y_continuous(labels = abs) + 
+  labs(x = "Age (years)") +
+  theme_bw() + 
+  theme(text=element_text(family="Helvetica", size =7),
+        strip.placement = "outside",
+        strip.background = element_blank(), 
+        strip.text = element_text(size = 7),
+        panel.spacing.y = unit(10, "pt"), 
+        axis.title.y = element_blank(),
+        axis.title.x=element_text(size=7),
+        legend.position = "bottom", 
+        legend.direction = "horizontal",
+        legend.text = element_text(size=7),
+        legend.title = element_text(size=7),
+        panel.grid=element_blank()) +
+  guides(fill = guide_legend(nrow = 1, title.vjust = 0.75, 
+                             label.position = "bottom", label.hjust = 0.5))
+
+#%>% 
+Fig5F<-ggplot(hit_change_ind_median_barplot_data %>% filter(type!="Number of total hits\n(median)"), aes(x = factor(interval_label,levels = c("birth", "3mo", "6mo", "1yr","1.5yr", "2yr", "3yr")), y = n_hit, fill = first_interval_label)) + 
+  facet_grid(type ~ ., scales = "free_y", space = "free_y", switch = "y") + 
+  geom_bar(stat = "identity", position = "stack", color = "black",alpha=0.7) + 
+  scale_fill_manual(name = "Time of first hit", values=c(pal1[2:8])) +
+  scale_y_continuous(labels = abs) + 
+  labs(x = "Age (years)") +
+  theme_bw() + 
+  theme(text=element_text(family="Helvetica", size = 7),
+        strip.placement = "outside",
+        strip.background = element_blank(), 
+        strip.text = element_text(size = 7),
+        panel.spacing.y = unit(10, "pt"), 
+        axis.title.y = element_blank(),
+        axis.title.x=element_text(size=7),
+        legend.position = "none", 
+        legend.direction = "horizontal", 
+        panel.grid=element_blank()) +
+  guides(fill = guide_legend(nrow = 1, title.vjust = 0.75, 
+                             label.position = "bottom", label.hjust = 0.5,override.aes = list(alpha = 0.7)))
+Fig5E
+Fig5F
+```
+# Compute half lifes of maternal diversity per species
+Individual list, virus list and the number of peptides for each individual  
+```{r}
+# Recreate maternal_decay directly from objects already generated in this document
+# Required existing objects: Mat_end_hits, maternal_hits, Viral_Annotations
+
+maternal_decay <- Mat_end_hits %>%
+  mutate(key = paste(donor, time_interval, id)) %>%
+  filter(key %in% maternal_hits$key) %>%
+  left_join(
+    maternal_hits %>%
+      select(id, donor, key, maternal, rm) %>%
+      distinct(),
+    by = c("id", "donor", "key")
+  ) %>%
+  mutate(id = as.numeric(id)) %>%
+  arrange(id, donor, Age_Years)
+
+# Classify how each maternal epitope changes across early time points
+maternal_decay <- maternal_decay %>%
+  group_by(id, donor) %>%
+  arrange(Age_Years, .by_group = TRUE) %>%
+  mutate(
+    delta_hit_past = c(NA, diff(hit)),
+    delta_hit_future = c(diff(hit), NA),
+    prev_hit = ifelse(delta_hit_past == -1, TRUE, FALSE),
+    prev_hit = ifelse(delta_hit_past == 0 & hit == 1, TRUE, prev_hit),
+    future_hit = ifelse(delta_hit_future == 1, TRUE, FALSE),
+    future_hit = ifelse(delta_hit_future == 0 & hit == 1, TRUE, future_hit),
+    hit_type = ifelse(hit == 1 & prev_hit == TRUE, "sustained hit", NA),
+    hit_type = ifelse(hit == 1 & prev_hit == FALSE, "boost", hit_type),
+    hit_type = ifelse(hit == 1 & Age_Years == 0, "maternal", hit_type),
+    hit_type = ifelse(hit == 0 & prev_hit == TRUE, "loss", hit_type),
+    hit_type = ifelse(hit == 0 & prev_hit == FALSE, "sustained loss", hit_type),
+    delta_zscore = c(0, diff(zscore)),
+    hit_type = ifelse(grepl("sustained hit", hit_type) & delta_zscore > 0,
+                      "sustained hit increasing", hit_type),
+    hit_type = ifelse(grepl("sustained hit", hit_type) & delta_zscore <= 0,
+                      "sustained hit decreasing", hit_type)
+  ) %>%
+  select(-delta_hit_past, -delta_hit_future, -prev_hit, -future_hit) %>%
+  ungroup()
+
+# Define full early-life trajectories and classify them
+maternal_decay_hit_type <- maternal_decay %>%
+  pivot_wider(
+    id_cols = c("id", "donor"),
+    names_from = "time_interval",
+    values_from = "hit_type",
+    values_fill = "missing"
+  ) %>%
+  mutate(
+    hit_trajectory = paste(`0`, `0.25`, `0.5`, `1`, sep = "_"),
+    trajectory_type = case_when(
+      grepl("increasing|boost", hit_trajectory) ~ "decay then boost",
+      !grepl("increasing|boost", hit_trajectory) ~ "only decay"
+    ),
+    trajectory_type = ifelse(
+      hit_trajectory == "maternal_sustained hit decreasing_missing_sustained hit decreasing",
+      "uncertain",
+      trajectory_type
+    )
+  ) %>%
+  select(id, donor, hit_trajectory, trajectory_type)
+
+maternal_decay <- maternal_decay %>%
+  left_join(maternal_decay_hit_type, by = c("id", "donor")) %>%
+  mutate(
+    hit_label = case_when(
+      hit_type == "maternal" ~ "maternal",
+      hit_type == "loss" ~ "loss",
+      hit_type == "sustained loss" ~ "loss",
+      hit_type == "sustained hit decreasing" ~ "decline",
+      hit_type == "sustained hit increasing" ~ "boost",
+      hit_type == "boost" ~ "boost"
+    )
+  )
+
+# Label measurements that belong to the maternal decay process
+maternal_decay <- maternal_decay %>%
+  mutate(
+    decay = case_when(
+      rm == "rm_after_0" & time_interval == 0.25 & hit == 0 ~ "decay",
+      rm == "rm_after_0" & time_interval == 0.25 & hit == 1 ~ "not decay",
+      rm == "rm_after_0" & time_interval > 0.25 ~ "not decay",
+      rm == "rm_after_1" & time_interval == 0.5 & hit == 0 ~ "decay",
+      rm == "rm_after_1" & time_interval == 0.5 & hit == 1 ~ "not decay",
+      rm == "rm_after_1" & time_interval > 0.5 ~ "not decay",
+      rm == "rm_after_2" & time_interval == 1 & hit == 0 ~ "decay",
+      rm == "rm_after_2" & time_interval == 1 & hit == 1 ~ "not decay",
+      rm == "rm_after_2" & time_interval > 1 ~ "not decay",
+      maternal == "maternal" ~ "decay"
+    )
+  )
+
+# Label maternal responses as retained, lost, or boosted
+maternal_first_boost <- maternal_decay %>%
+  filter(hit_label == "boost") %>%
+  group_by(id, donor) %>%
+  summarise(
+    first_boost_age = min(Age_Years),
+    first_boost_interval = min(time_interval),
+    .groups = "drop"
+  )
+
+maternal_decay <- maternal_decay %>%
+  left_join(maternal_first_boost, by = c("id", "donor")) %>%
+  mutate(
+    status = case_when(
+      hit_label == "maternal" ~ "maternal",
+      hit_label == "loss" ~ "lost",
+      hit_label == "decline" ~ "retained",
+      hit_label == "boost" ~ "boosted"
+    ),
+    status = ifelse(
+      !is.na(first_boost_age) & Age_Years >= first_boost_age,
+      "boosted",
+      status
+    )
+  )
+
+# Add viral annotations and species labels
+viral_annotation_subset <- Viral_Annotations %>%
+  select(id, species, family_label) %>%
+  distinct() %>%
+  mutate(id = as.numeric(id))
+
+species_label_lookup <- viral_annotation_subset %>%
+  select(species, family_label) %>%
+  distinct() %>%
+  mutate(
+    species_label = case_when(
+      species == "Measles morbillivirus" ~ "Measles",
+      species == "Human betaherpesvirus 5" ~ "CMV",
+      species == "Influenza A virus" ~ "Influenza A",
+      species == "Influenza B virus" ~ "Influenza B",
+      species == "Human gammaherpesvirus 4" ~ "EBV",
+      species == "Rubivirus rubellae" ~ "Rubella",
+      species == "Human orthopneumovirus" ~ "RSV",
+      family_label == "Herpesviridae" &
+        !(species %in% c(
+          "Human betaherpesvirus 5",
+          "Human gammaherpesvirus 4",
+          "Human alphaherpesvirus 1",
+          "Human alphaherpesvirus 2"
+        )) ~ "Other human herpesviruses",
+      species %in% c("Human alphaherpesvirus 1", "Human alphaherpesvirus 2") ~
+        "Herpes simplex virus 1/2",
+      species %in% c("Rotavirus A", "Rotavirus B") ~ "Rotavirus",
+      grepl("Enterovirus", species) ~ "Human enteroviruses",
+      family_label == "Adenoviridae" ~ "Human adenoviruses",
+      family_label == "Coronaviridae" ~ "Human coronaviruses",
+      TRUE ~ "Other viruses"
+    )
+  )
+
+maternal_decay <- maternal_decay %>%
+  left_join(viral_annotation_subset, by = "id") %>%
+  left_join(species_label_lookup, by = c("species", "family_label")) %>%
+  select(
+    id, species, species_label, family_label,
+    donor,
+    Age_Years, time_interval, interval_label,
+    zscore, trunc_zscore, hit, delta_zscore,
+    key,
+    maternal, rm,
+    decay,
+    hit_type, hit_label,
+    hit_trajectory, trajectory_type,
+    first_boost_age, first_boost_interval,
+    status
+  ) #%>%
+  #filter(donor != "D619")
+```
+
+```{r number of maternal Abs at birth}
+# a list of individuals ordered alphabetically
+ind_list <- sort(unique(maternal_decay$donor))
+print(ind_list)
+
+# a list of virus species ordered alphabetically
+virus_list <- sort(unique(maternal_decay$species_label))
+virus_list <- c(virus_list[virus_list != "Other viruses"], "Other viruses")
+print(virus_list)
+
+# number of peptides at birth for each individual
+peptide_n_at_birth <- maternal_decay %>% 
+  dplyr::filter(interval_label == "birth") %>% 
+  dplyr::group_by(donor) %>% 
+  dplyr::count() %>% 
+  dplyr::mutate(donor = ordered(donor, levels = ind_list)) %>% 
+  dplyr::arrange(donor)
+```  
+# Table S1
+Include only peptides that showed a decrease-only trend since birth  
+```{r number of maternal antibodies at each time point}
+maternal_only_decay <- maternal_decay %>% 
+  filter(trajectory_type == "only decay", maternal == "maternal") %>% 
+  group_by(donor, species_label, Age_Years, time_interval, interval_label,family_label) %>% 
+  summarise(n = n(), .groups = "drop") %>% mutate(Age_Days=Age_Years*365)
+
+
+# calculate decay rate and half-life assuming an exponential decay
+maternal_decay_n_peptides <- maternal_only_decay %>% 
+  group_by(donor, species_label,family_label) %>% 
+  summarise(y0 = lm(log(n) ~ Age_Days)$coefficients[1],
+            coeff = lm(log(n) ~ Age_Days)$coefficients[2],
+            .groups = "drop") %>% 
+  filter(!is.na(coeff)) %>% 
+  mutate(lambda = -coeff, 
+         half_life = log(2) / lambda)
+
+# median decay rate for each virus
+maternal_decay_n_peptides_median <- maternal_decay_n_peptides %>% 
+  group_by(species_label) %>% 
+  summarise(median = median(half_life), iqr=IQR(half_life), .groups = "drop") %>% 
+  arrange(desc(median))
+
+maternal_decay_n_peptides_median
+```  
+# Prepare data for figure 5D
+```{r}
+Fig5D_dat<-Dat_5D %>% filter(donor %in% c("D607","D613","D626"))
+virus_key_5D<-virus_key_5D %>% filter(spec_label %in% Fig5D_dat$spec_label)
+# turn virus_key into two named vectors
+species_shapes <- setNames(virus_key_5D$shape_label, virus_key_5D$spec_label)
+species_cols   <- setNames(virus_key_5D$colour,      virus_key_5D$spec_label)
+```
+
+
+
+
+```{r}
+set.seed(10)
+counter=1
+for (i in seq(Fig5D_dat$age_mod)) {
+  if (counter==1) {
+    Fig5D_dat$ymod[i] <- 4
+    counter <- 2
+  } else if (counter == 2) {
+    Fig5D_dat$ymod[i] <- 5
+    counter <- 3
+  } else if (counter == 3) {
+    Fig5D_dat$ymod[i] <- 6
+    counter <- 4
+  } else if (counter == 4) {
+    Fig5D_dat$ymod[i]<- 5
+    counter <-1
+  }
+}
+
+Fig5D_dat$spec_label <- factor(Fig5D_dat$spec_label,
+                           levels = virus_key_5D$spec_label)
+Fig5D<-ggplot(Fig5D_dat, 
+       aes(x = age_mod, y = ymod, colour = spec_label, shape = spec_label)) +
+  
+  geom_segment(aes(xend = age_mod, y = 0, yend = ymod), alpha = 0.6) +
+  geom_point(size = 2) +
+  xlim(c(0,3.25)) +
+  coord_polar(theta = "x")  +
+
+  scale_colour_manual(name = "Virus", values = species_cols) +
+  scale_shape_manual(name  = "Virus", values = species_shapes) +
+  facet_wrap(~donor, ncol = 3) +
+
+  guides(
+    colour = guide_legend(
+      ncol       = 2,           # wrap into 2 rows
+      direction   = "vertical",# lay keys out horizontally
+      title.position = "top"     # put “Virus” title above symbols
+    ),
+    shape  = guide_legend(
+      ncol=2,
+      direction   = "vertical",
+      title.position = "top"
+    )
+  ) +
+
+  theme_minimal() +
+  theme(
+    text             = element_text(family = "Helvetica", color = "black", size = 7),
+    axis.text.y      = element_blank(),
+    axis.ticks       = element_blank(),
+    axis.title.y     = element_blank(),
+    axis.title.x     = element_text(size = 7),
+    axis.text.theta  = element_text(size = 7, color = "black"),
+    legend.position  = "left",
+    legend.direction = "vertical",  # ensure the box is horizontal
+    legend.box       = "vertical",  # if multiple legends, keep them side by side
+    legend.text      = element_text(size = 6),
+    legend.title     = element_text(size = 7),
+    legend.key.height = unit(0.3, "lines"),   
+    legend.spacing.y  = unit(1.2, "lines")
+  ) +
+
+  xlab("Age (years)") 
+  
+Fig5D
+```
+# Combine
+```{r,fig.width=7,fig.height=6.5}
+ggarrange(ggarrange(Fig5A,Fig5B,Fig5C+theme(legend,title = element_text(size=7)),labels = c("a","b","c"),nrow = 1,font.label = list(family="Helvetica",size=8)), Fig5D, ggarrange(ggarrange(Fig5E,Fig5F,labels = c("e","f"),nrow=1,font.label = list(family="Helvetica",size=8)),nrow=2,heights=c(12,1)),nrow=3,heights = c(1.75,1.75,2.5),labels = c("","d",""),font.label = list(family="Helvetica",size=8))
+ggsave(file=paste0(folder_path_save, "/AVARS_Figure_5_Final.pdf"))
+dev.off()
+```
+
+

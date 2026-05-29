@@ -1,0 +1,540 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+# Load packages
+easypackages::libraries(c("readr","readxl","dplyr","tidyr","ggplot2","ggpubr","UpSetR","cowplot","grid","ggplotify","data.table","plotROC","pROC","lme4", "splines","emmeans","tidytext"))
+
+# insert path to folders
+directory_path <- "" # CHANGE THIS to path to director enclosing code and data sets
+folder_path <- paste0(directory_path, "/Supplemental Tables/") # folder containing downloaded data sets
+intermediate_folder_path <- paste0(directory_path, "/Intermediate Files Used in Plots/") # path containing intermediate outputs
+folder_path_save <- paste0(directory_path, "/Complete Figures/")# define folder path to save images to
+folder_path_code <- paste0(directory_path, "/Functions and General Analysis Code/") # change this to folder containing downloaded functions and code
+
+# Load Supplemental Data
+combined_metadata_dist <- read_csv(paste0(folder_path,"Data Table S1.csv"))
+all_zs_combined <- read_csv(paste0(folder_path,"Data Table S2.csv"))
+all_hits_combined <- read_csv(paste0(folder_path,"Data Table S3.csv"))
+Viral_Annotations <- read_csv(paste0(folder_path,"Data Table S4.csv"))
+
+# Load Intermediate data
+Z_fam_cor_combined <- read_csv(paste0(intermediate_folder_path,"Viral_Family_Autocorrelation_Relative_to_initial_samples_by_age.csv"))  # Data frame used was generated in the script "Generate Viral Family Correlation Trajectories.R"
+adult_Consec_Zs <- read_csv(paste0(intermediate_folder_path,"Adult_Consec_Zs.csv")) # Data frame used was generated in the script "Generate Consecutive Z Score Files.R"
+ped_5_Zs <- read_csv(paste0(intermediate_folder_path,"Ped_5_apart_Zs.csv")) # Data frame used was generated in the script "Generate Consecutive Z Score Files.R"
+
+pal1<-c("#F87E2E", "#FFEC33", "#1FAA79", "#14C4F8", "#0077C8", "#9870F5", "#D53EE1", "#FF36B0", "#D72638", "#6E6E6E")
+source(paste0(folder_path_code,"Immunoprint functions.R"))
+
+```
+
+# Prepare Data for Figure 4 A-B
+```{r}
+set.seed(10)
+
+# Figure 4 A-B use D579 as an example
+temp_donors<-"D579"
+temp_meta<-combined_metadata_dist %>% filter(donor %in% temp_donors)
+temp_zs<-all_zs_combined %>% select(c(id,temp_meta$identifier))
+
+# Use trajectory functions to prepare data for 4 A-B
+input1 <- generate_heat_frame(temp_zs,Viral_Annotations, temp_meta)
+input2 <- generate_trajectory_frame(temp_zs, Viral_Annotations, temp_meta)
+
+# Order according to age
+temp_order<-input1 %>% select(c(samp_label,Age_Years)) %>% distinct() %>% arrange(Age_Years)
+temp <- input1  %>% group_by(family_label,`Protein names`,donor) %>% summarise(sum_adj=sum(adjZ)) %>% filter(sum_adj>3.5) # limit to proteins that have been targeted by the donor
+temp_heat<-temp %>% left_join(input1)
+temp<-temp_heat %>% group_by(id,donor) %>% summarise(max_adj_pep=max(adjZ)) %>% filter(max_adj_pep>3.5) # limit to peptides that have been targeted in the donor
+input1<-temp %>% left_join(temp_heat)
+rm(temp,temp_heat)
+
+# Prepare correlation data for panel B
+Z_fam_cor_long <- input2 %>% select(-c(label))%>% pivot_longer(-c(sample1,sample2,donor1,donor2,Age_Years1,Age_Years2,samp1,samp2,years_between),names_to = "family_label",values_to = "fam_cor")
+```
+
+# Generate Figure 4 A-B
+```{r,fig.width=7,fig.height=6}
+# Panel A
+input1_ord <- input1 %>%
+  group_by(family_label) %>%
+  arrange(species, as.numeric(id), .by_group = TRUE) %>%
+  mutate(row_rank = row_number()) %>%
+  ungroup() %>%
+  mutate(id_reord = reorder_within(id, row_rank, family_label))
+
+Fig_4_A <- ggplot(input1_ord) +
+  geom_tile(aes(
+    x = factor(samp_label, levels = c(temp_order$samp_label)),
+    y = id_reord,
+    fill = adjZ
+  )) +
+  facet_wrap(
+    ~ factor(family_label, levels = c("Herpesviridae","Picornaviridae","Orthomyxoviridae",
+                                     "Pneumoviridae","Adenoviridae","Coronaviridae","Paramyxoviridae")),
+    scales = "free_y", nrow = 1
+  ) +
+  scale_y_reordered() +
+  theme_minimal() +
+  theme(
+    text = element_text(family="Helvetica", size=7),
+    axis.text.y = element_blank(),
+    axis.text.x = element_text(angle = 90, size=7),
+    axis.ticks = element_blank(),
+    strip.text.y = element_blank(),
+    legend.position = "top",
+    legend.key.height = unit(0.2, "cm"), 
+    legend.key.width = unit(1.0, "cm"),
+    legend.margin = margin(b = -5, unit = "pt"), 
+    legend.box.margin = margin(t = 0, b = -5, unit = "pt"),
+    legend.spacing.x = unit(0.1, 'cm'),
+    legend.spacing.y = unit(0, 'cm'),
+    axis.title.x = element_blank(),
+    axis.title.y = element_text(size=7),
+    strip.text.x = element_text(size=7),
+    legend.title = element_text(size=7),
+    panel.grid = element_blank(),
+    panel.background = element_blank(),
+    panel.spacing = unit(0.07, "lines")
+  ) +
+  scale_fill_gradientn(
+    "Bounded\nMean EBS",
+    colours = c("white","gray90",pal1[9],"red3"),
+    breaks = c(0,5,10,15)
+  ) +
+  ylab("VirScan\nPeptide")
+Fig_4_A
+
+# Panel B
+Fig_4_B<-ggplot(Z_fam_cor_long, aes(x=years_between,alpha=0.7)) +
+  geom_line(aes(y=fam_cor,color=family_label),size=1) + 
+  ylab("Correlation") + 
+  facet_wrap(~factor(family_label,levels = c("Herpesviridae", "Picornaviridae", "Orthomyxoviridae", "Pneumoviridae", "Adenoviridae", "Coronaviridae", "Paramyxoviridae")), nrow=1) +
+  theme_minimal() +
+  scale_color_manual(name="Viral\nfamily",values = pal1[c(1,3:8)], breaks = c("Herpesviridae", "Picornaviridae", "Orthomyxoviridae", "Pneumoviridae", "Adenoviridae", "Coronaviridae", "Paramyxoviridae"), guide=guide_legend(override.aes = list(alpha = 0.6),reverse = TRUE)) +
+  theme(text=element_text(family="Helvetica",size=7),
+        legend.position = "none",
+        strip.text.x = element_text(size=7),
+        axis.title = element_text(size=7),
+        axis.text = element_text(size = 7, color = "black"),
+        axis.text.x = element_text(angle=45),
+        panel.spacing = unit(0.25, "lines")) + 
+  ylim(c(-0.01,1)) +
+  xlab("Sampling interval (years)") +
+  scale_x_continuous(breaks = c(0, 5, 10))
+Fig_4_B
+```
+# Generate Data for Figure 4 C
+Data frame used was generated in the script "Generate Viral Family Correlation Trajectories.R"
+# Quantitatively compare stability across families within age group using a semi-parametric mixed model
+
+```{r}
+Z_fam_cor_combined_long <- Z_fam_cor_combined %>% select(-c(label))%>% pivot_longer(-c(sample1,sample2,donor1,donor2,Age_Years1,Age_Years2,samp1,samp2,years_between,facet_label),names_to = "family_label",values_to = "fam_cor") %>% 
+  mutate(
+  facet_label = stringr::str_replace(
+    facet_label,
+    "\\n\\((\\d+)\\)$",
+    "\n(n = \\1)"
+  )
+)
+## Fisher Z Transform correlations for model
+Z_fam_cor_combined_long <- Z_fam_cor_combined_long %>%
+  mutate(
+    z_cor = atanh(pmin(pmax(fam_cor, -0.9999), 0.9999)) # avoid ±1
+  )
+# Nonlinear trajectory with splines
+fit_spline <- lmer(
+  z_cor ~ ns(years_between, df = 3) * family_label * facet_label + (1 | donor1),
+  data = Z_fam_cor_combined_long %>% filter(years_between <= 12)
+)
+
+# Compare between families at fixed time points
+emm_time <- emmeans(
+  fit_spline,
+  ~ family_label | facet_label * years_between,
+  at = list(years_between =c(0,5,10)),pbkrtest.limit = 4256
+)
+
+# Pairwise comparisons of families within each age group & timepoint
+pairwise_time <- contrast(emm_time, method = "pairwise", by = c("facet_label", "years_between"))
+
+summary(pairwise_time)
+
+# Transform back to original correlation scale
+emm_time_corr <- emm_time %>%
+  as.data.frame() %>%
+  mutate(
+    est_r   = tanh(emmean),
+    lower_r = tanh(lower.CL),
+    upper_r = tanh(upper.CL),
+    # ensure consistent family order for facets
+    family_label = factor(
+      family_label,
+      levels = c(
+        "Herpesviridae", "Picornaviridae",
+        "Orthomyxoviridae", "Pneumoviridae", "Adenoviridae",
+        "Coronaviridae", "Paramyxoviridae"
+      )
+    )
+  )
+
+emm_time_corr %>% filter(years_between !=0)
+```
+# Compare correlations at 5 years
+
+```{r}
+# Adult ranking
+emm_time_corr %>% filter(years_between == 5,facet_label=="Adults\n(n = 96)") %>%
+  arrange(desc(est_r))
+
+
+# Statistical comparison
+emm_5yr <- subset(emm_time, years_between == 5) 
+emm_5yr <- subset(emm_5yr,facet_label=="Adults\n(n = 96)")
+emm_5yr
+
+pairwise_fam_5yr <- emmeans::contrast(emm_5yr, method = "pairwise")
+
+summary(pairwise_fam_5yr, adjust = "BH") %>% arrange(p.value)   # or adjust = "tukey"
+```
+
+# Plot 5 Year R
+```{r}
+# Define family set + colors as in Fig 4B
+fam_levels <- c(
+  "Herpesviridae",
+  "Picornaviridae",
+  "Orthomyxoviridae",
+  "Pneumoviridae",
+  "Adenoviridae",
+  "Coronaviridae",
+  "Paramyxoviridae"
+)
+
+family_cols <- setNames(
+  pal1[c(1, 3:8)],
+  fam_levels
+)
+
+#  Compute ordering from Adults (96) at 5 years
+fam_order_adults <- emm_time_corr %>%
+  dplyr::filter(years_between == 5, facet_label == "Adults\n(n = 96)") %>%
+  dplyr::arrange(dplyr::desc(est_r)) %>%
+  dplyr::pull(family_label) %>%
+  as.character()
+
+# keep only the families you expect, and keep the expected order if anything is missing
+fam_order_adults <- fam_order_adults[fam_order_adults %in% fam_levels]
+if (length(fam_order_adults) == 0) fam_order_adults <- fam_levels
+
+# 3) Apply ordering 
+emm_time_corr_ord <- emm_time_corr %>%
+  dplyr::mutate(
+    family_label = factor(family_label, levels = fam_order_adults)
+  )
+
+#  plot
+Fig_4_D <- ggplot2::ggplot(
+  emm_time_corr_ord %>% dplyr::filter(years_between == 5),
+  ggplot2::aes(x = family_label, y = est_r, color = family_label)
+) +
+  ggplot2::geom_point(size = 2) +
+  ggplot2::geom_errorbar(
+    ggplot2::aes(ymin = lower_r, ymax = upper_r),
+    width = 0.15,
+    linewidth = 0.6
+  ) +
+  ggplot2::coord_flip() +
+  ggplot2::facet_wrap(~ facet_label) +
+  ggplot2::scale_color_manual(values = family_cols, breaks = fam_levels) +
+  ggplot2::theme_minimal() +
+  ggplot2::theme(
+    text = ggplot2::element_text(family = "Helvetica",size=7),
+    legend.position = "none",
+    strip.text.x = ggplot2::element_text(size = 7),
+    axis.title = ggplot2::element_text(size=7),
+    axis.text = ggplot2::element_text(size=7),
+    panel.spacing = grid::unit(0.25, "lines"),
+    panel.border = ggplot2::element_rect(fill = NA, color = "black"),
+    panel.grid.y = ggplot2::element_blank()
+  ) +
+  ggplot2::labs(
+    y = "Estimated 5-year correlation",
+    x = "Viral family"
+  ) 
+
+Fig_4_D
+
+```
+
+
+# Generate Figure 4 C
+```{r}
+# Plot
+family_levels <- c(
+  "Herpesviridae", "Picornaviridae",
+  "Orthomyxoviridae", "Pneumoviridae", "Adenoviridae",
+  "Coronaviridae", "Paramyxoviridae"
+)
+
+Z_fam_cor_combined_long <- Z_fam_cor_combined_long %>%
+  mutate(
+    family_label = factor(family_label, levels = family_levels)
+  )
+
+emm_time_corr <- emm_time_corr %>%
+  mutate(
+    family_label = factor(family_label, levels = family_levels)
+  )
+
+Fig_4_C_alt <- ggplot() + geom_line(
+    data = Z_fam_cor_combined_long %>% filter(years_between <= 12),
+    aes(
+      x     = years_between,
+      y     = fam_cor,
+      color = family_label,
+      group = donor1
+    ),
+    alpha = 0.3,
+    size  = 0.5
+  ) +
+  # model-based CI ribbon
+  geom_ribbon(
+    data  = emm_time_corr,
+    aes(
+      x     = years_between,
+      ymin  = lower_r,
+      ymax  = upper_r,
+      group = interaction(facet_label, family_label)
+    ),
+    inherit.aes = FALSE,
+    fill        = "grey50",
+    alpha       = 0.6
+  ) +
+  # model-based mean curve
+  geom_line(
+    data = emm_time_corr,
+    aes(
+      x     = years_between,
+      y     = est_r,
+      color = family_label,
+      group = family_label
+    ),
+    inherit.aes = FALSE,
+    size        = 1.0
+  ) +
+  ylab("Correlation") +
+  facet_grid(facet_label ~ family_label) +
+  theme_minimal() +
+  scale_color_manual(
+    name   = "Viral\nfamily",
+    values = pal1[c(1,3:8)],
+    breaks = family_levels,
+    guide  = guide_legend(
+      override.aes = list(alpha = 0.6),
+      reverse = TRUE
+    )
+  ) +
+  theme(
+    text            = element_text(family = "Helvetica",size=7),
+    legend.position = "none",
+    strip.text.x    = element_text(size = 7),
+    strip.text.y    = element_text(size = 7),
+    axis.title      = element_text(size = 7),
+    axis.text       = element_text(size = 7, color = "black"),
+    axis.text.x     = element_text(angle = 45, hjust = 1),
+    panel.spacing   = unit(0.5, "lines")
+  ) +
+  xlim(c(0, 12)) +
+  xlab("Sampling interval (years)") +
+  scale_x_continuous(breaks = c(0, 5, 10))
+
+Fig_4_C_alt
+```
+
+
+# Figure 4 Combined
+```{r,fig.width=7,fig.height=8}
+ggarrange(ggarrange(Fig_4_A + theme(legend.text = element_text(size=6), axis.text.x=element_text(size=7, color="black")),ggplot(NULL)+theme_void(),widths = c(14,0.75)),ggarrange(Fig_4_B+theme(axis.text.x = element_text(angle = 45, size=7)),ggplot(NULL)+theme_void(),widths = c(14,0.75)),Fig_4_C_alt,ggarrange(Fig_4_D, ggplot(NULL)+theme_void(), nrow=1, widths = c(14,0.2)) ,nrow = 4,heights = c(1.1,0.70,2.05,1),labels=c("a","b","c","d"),font.label = list(family="Helvetica",size=8))
+ggsave(file=paste0(folder_path_save, "/AVARS_Figure_4_Final.pdf"))
+dev.off()
+```
+
+
+# Address different number of peptides per family
+## Do analysis on the viral families with greater library representation (Herpesviruses ~17000, Other~25000, Orthomyxoviriae ~7500)
+ family_label     n_entries n_peptides
+1 Adenoviridae           575       4838
+2 Coronaviridae           70       2841
+3 Herpesviridae         1571      17072
+4 Orthomyxoviridae      1165       7535
+5 Paramyxoviridae        101       1286
+6 Picornaviridae         137       5069
+7 Pneumoviridae          199       1099
+
+### Sample varying numbers of peptides 
+Number of peptides ranges from 1099-17072
+sample: 1000, 2000, 5,000, 7500, 10,000, 15,000, 17,000 from Herpesviridae
+sample: 1000, 2000, 5,000, 7500 from Orthmyxoviridae
+sample: 1000, 2000, 5,000 from Picornaviridae
+```{r}
+downsampled_corr <- read.csv(file=paste0(intermediate_folder_path, "Down_sampled_viral_family_correlation_adult.csv")) # Generated in "Generate Viral Family Correlation Trajectories.R"
+
+downsampled_fits <- summarize_downsampled_by_model(
+  downsampled_corr,
+  time_points = c(0, 2, 5)
+)
+
+# keep 5y and 10y only, and label them for faceting
+downsampled_plot <- downsampled_fits %>%
+  filter(years_between %in% c(2, 5)) %>%
+  mutate(
+    n_peptides_sampled = as.numeric(as.character(n_peptides_sampled)),
+    time_label = factor(
+      years_between,
+      levels = c(2, 5),
+      labels = c("2-year sampling interval", "5-year sampling interval")
+    )
+  ) %>%
+  filter(!is.na(n_peptides_sampled), !is.na(est_r))
+
+# summary (median + 95% interval) WITHIN each time_label
+summ_plot <- downsampled_plot %>%
+  group_by(time_label, family_label, n_peptides_sampled) %>%
+  summarize(
+    med = median(est_r, na.rm = TRUE),
+    lo  = quantile(est_r, 0.025, na.rm = TRUE),
+    hi  = quantile(est_r, 0.975, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+Fig_S_4_A <- ggplot(downsampled_plot) +
+  # individual downsampling iterations
+  geom_line(
+    aes(
+      x     = n_peptides_sampled,
+      y     = est_r,
+      group = iter
+    ),
+    alpha = 0.12
+  ) +
+
+  # summary ribbon (95% interval across iterations)
+  geom_ribbon(
+    data = summ_plot,
+    aes(
+      x     = n_peptides_sampled,
+      ymin  = lo,
+      ymax  = hi,
+      group = 1
+    ),
+    inherit.aes = FALSE,
+    alpha = 0.3,
+    fill  = pal1[6]
+  ) +
+
+  # summary line (median)
+  geom_line(
+    data = summ_plot,
+    aes(
+      x     = n_peptides_sampled,
+      y     = med,
+      group = 1
+    ),
+    inherit.aes = FALSE,
+    size  = 0.8,
+    color = pal1[6]
+  ) +
+
+  # summary dots (median)
+  geom_point(
+    data = summ_plot,
+    aes(
+      x     = n_peptides_sampled,
+      y     = med,
+      group = 1
+    ),
+    inherit.aes = FALSE,
+    size  = 1.1,
+    color = pal1[6]
+  ) +
+
+  # row = time, columns = family
+  facet_grid(time_label ~ family_label) +
+
+  theme_minimal() +
+  xlab("Number of peptides sampled") +
+  ylab("Model-estimated correlation") +
+  ylim(c(0, 1)) +
+
+  theme(
+    text            = element_text(family = "Helvetica", size=7),
+    legend.position = "none",
+    strip.text.x    = element_text(size = 7),
+    strip.text.y    = element_text(size = 7),
+    axis.title      = element_text(size = 7),
+    axis.text       = element_text(size = 7),
+    panel.border    = element_rect(fill = NA, color = "black"),
+    panel.grid      = element_blank()
+  )
+```
+### Heatmap visualization
+```{r}
+heat_df <- downsampled_fits %>%
+  filter(years_between %in% c(2, 5)) %>%
+  mutate(
+    n_peptides_sampled = as.numeric(as.character(n_peptides_sampled)),
+    time_label = factor(
+      years_between,
+      levels = c(2, 5),
+      labels = c("2 years", "5 years")
+    )
+  ) %>%
+  group_by(time_label, family_label, n_peptides_sampled) %>%
+  summarize(
+    med_est_r = median(est_r, na.rm = TRUE),
+    .groups = "drop"
+  )
+family_levels_2 <- c("Herpesviridae","Orthomyxoviridae","Picornaviridae")
+heat_df <- heat_df %>%
+  mutate(
+    family_label = factor(family_label, levels = family_levels_2)
+  )
+
+Fig_S_4_B <- ggplot(heat_df, aes(x = as.factor(n_peptides_sampled), y = family_label, fill = med_est_r)) +
+  geom_tile(color = "black", size = 0.3) +
+  geom_text(aes(label = sprintf("%.2f", med_est_r)), size = 2.5) +
+  facet_grid(~ time_label) +
+  theme_minimal() +
+  theme(
+    text = element_text(family = "Helvetica", color = "black"),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.grid = element_blank(),
+    strip.text.x    = element_text(size = 7),
+    strip.text.y    = element_text(size = 7),
+    axis.title      = element_text(size = 7),
+    axis.text       = element_text(size = 7),
+  ) +
+  labs(x="Number of peptides sampled", y="Viral family", fill="Median est_r") +
+  coord_fixed() + 
+  scale_fill_gradientn(colours = c("white",pal1[4],pal1[8]),limits=c(0,1), name = "Median\nestimated r") 
+```
+
+### Combine Panels
+```{r, fig.width=7,fig.height=6}
+ggarrange(Fig_S_4_A, Fig_S_4_B + theme(legend.title = element_text(size=7),legend.text = element_text(size=7)), labels=c("a","b"),font.label = list(family="Helvetica",size=8),nrow=2, heights = c(2.5,1.4))
+ggsave(file=paste0(folder_path_save, "/AVARS_Figure_S4_Final.pdf"))
+dev.off()
+```
+  
+
+
+
+
+
+
+
+
+

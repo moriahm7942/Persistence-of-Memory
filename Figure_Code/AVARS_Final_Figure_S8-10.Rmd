@@ -1,0 +1,163 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+```{r}
+easypackages::libraries(c("readr","readxl","dplyr","tidyr","ggplot2","ggpubr","data.table","stringr"))
+# insert path to folders
+directory_path <- "" # CHANGE THIS to path to director enclosing code and data sets
+folder_path<-paste0(directory_path, "/Supplemental Tables/") # folder containing downloaded data sets
+
+# Load Supplemental Data
+combined_metadata_dist <- read_csv(paste0(folder_path,"Data Table S1.csv"))
+all_zs_combined <- read_csv(paste0(folder_path,"Data Table S2.csv"))
+all_hits_combined <- read_csv(paste0(folder_path,"Data Table S3.csv"))
+Viral_Annotations <- read_csv(paste0(folder_path,"Data Table S4.csv"))
+
+# Load custom functions
+folder_path_code <- paste0(directory_path, "/Functions and General Analysis Code/") # folder containing downloaded functions and code
+source(paste0(folder_path_code,"Immunoprint functions.R"))
+
+pal1<-c("#F87E2E", "#FFEC33", "#1FAA79", "#14C4F8", "#0077C8", "#9870F5", "#D53EE1", "#FF36B0", "#D72638", "#6E6E6E")
+
+```
+
+# S8 Family
+```{r,fig.width=7,fig.height=8}
+# By viral family
+# Metadata of Interest
+temp_meta<-combined_metadata_dist %>% filter(ped_long_1)
+temp_hits<-all_hits_combined %>% select(c(id,all_of(temp_meta$identifier))) %>% left_join(Viral_Annotations %>% select(c(id,species,family_label))) %>% pivot_longer(-c(id,species,family_label),names_to = "identifier",values_to = "hit")
+temp_hits <- temp_hits %>% group_by(identifier,species,family_label) %>% summarise(n_hits=sum(hit),.groups="drop")
+temp_hits %>% arrange(n_hits)
+temp_hits<-temp_hits  %>% left_join(temp_meta %>% select(c(identifier,donor,Age_Years)))
+
+ggplot(temp_hits %>% group_by(identifier,Age_Years,family_label,donor) %>% summarise(n_fam_hits=sum(n_hits))) +
+  geom_line(aes(x=Age_Years,y=n_fam_hits,color=family_label))+facet_wrap(~donor) +
+  theme_minimal() +
+  theme(text = element_text(family = "Helvetica", size = 7),legend.position="top",panel.grid = element_blank(),panel.border = element_rect(color="black",fill=NA),strip.text = element_text(size=7),legend.title = element_text(size=7),legend.text = element_text(size=7),axis.text = element_text(size=7),axis.title = element_text(size=7)) +
+scale_color_manual(name="Viral\nfamily",values = pal1 , breaks = c("Other", "Herpesviridae","Picornaviridae","Orthomyxoviridae", "Pneumoviridae", "Adenoviridae", "Coronaviridae", "Paramyxoviridae"), guide=guide_legend(override.aes = list(alpha = 0.6,linetype = 1, size =7,legend.spacing.y = unit(0, "lines")),reverse = TRUE)) +
+  xlab("Age (years)") +
+  ylab("Number of\npeptides targeted")
+folder_path_save <- paste0(directory_path, "/Complete Figures/")
+ggsave(file=paste0(folder_path_save, "/AVARS_Figure_S8_Final.pdf"))
+dev.off()
+```
+
+
+```{r,fig.width=7,fig.height=8}
+# Metadata of Interest
+temp_species=temp_hits %>% filter(n_hits>5) %>% group_by(species,family_label) %>% summarise(n_5_hits=max(row_number()),.groups = "drop") %>% arrange(desc(n_5_hits)) %>% filter(species!="Hepacivirus C") %>% slice_head(n=50) # Use top 50
+temp_hits<-temp_hits %>% filter(species %in% temp_species$species) %>% left_join(temp_meta %>% select(c(identifier,donor,Age_Years)))
+
+# Function to add hyphen to long words
+add_hyphen_wrap <- function(text, width) {
+  words <- str_split(text, " ")[[1]]  # Split the text into words
+  
+  words <- sapply(words, function(word) {
+    if (nchar(word) > width) {
+      # Create a sequence of positions to split the word into chunks
+      chunks <- unlist(lapply(seq(1, nchar(word), by = width), function(i) {
+        str_sub(word, i, min(i + width - 1, nchar(word)))
+      }))
+      return(paste(chunks, collapse = "-\n"))  # Join chunks with hyphen
+    }
+    return(word)
+  })
+  
+  # Join the words back into a single string
+  return(paste(words, collapse = " "))
+}
+
+# Apply function to wrapped labels
+temp_hits$species_wrapped <- sapply(temp_hits$species, add_hyphen_wrap, width = 16)
+temp_hits$species_wrapped <-str_wrap(temp_hits$species_wrapped, width = 16)
+
+temp_hits<-temp_hits %>% mutate(family_label=ifelse(species %in% c("Hepacivirus C", "Human picobirnavirus", "Mamastrovirus 1", "Norwalk virus", "Orthohepevirus A", "Rotavirus A", "Rubivirus rubellae"),"Other RNA virus",family_label))%>% mutate(family_label=ifelse(species %in% c("Alphapapillomavirus 10", "Alphapapillomavirus 6", "Alphapapillomavirus 7", "Alphapapillomavirus 9", "Betapapillomavirus 1", "Betapapillomavirus 2", "Hepatitis B virus", "Molluscum contagiosum virus", "Vaccinia virus"),"Other DNA virus",family_label)) 
+
+
+
+# RNA viruses
+temp_order<-unique(temp_hits %>% select(c(species_wrapped,family_label))) %>% arrange(family_label)
+ggplot(temp_hits %>% 
+         filter(family_label %in% c("Picornaviridae","Coronaviridae",
+                                    "Pneumoviridae","Paramyxoviridae",
+                                    "Orthomyxoviridae","Other RNA virus"))) +
+  geom_line(aes(x = Age_Years,
+                y = n_hits,
+                colour = family_label,
+                group  = donor),
+            size = 0.25) +
+  facet_wrap(~ factor(species_wrapped, levels = c(temp_order$species_wrapped)),
+             scales = "free_y") +
+  xlab("Age (years)") +
+  ylab("Number of\npeptides targeted") +
+  scale_color_manual(
+    name   = "Viral\nfamily",
+    values = pal1,
+    breaks = c("Other RNA virus","Herpesviridae","Picornaviridae",
+               "Orthomyxoviridae","Pneumoviridae","Adenoviridae",
+               "Coronaviridae","Paramyxoviridae")
+  ) +
+  guides(
+    colour = guide_legend(
+      override.aes = list(size = 4),reverse = TRUE   # <-- here!
+    )
+  ) +
+  theme_minimal() +
+  theme(
+    text            = element_text(family = "Helvetica", size = 7),
+    legend.position = "top",
+    panel.grid      = element_blank(),
+    panel.border    = element_rect(color = "black", fill = NA),
+    strip.text      = element_text(size = 7),
+    legend.title    = element_text(size = 7),
+    legend.text     = element_text(size = 7),
+    axis.text       = element_text(size = 7),
+    axis.title      = element_text(size = 7)
+  )
+
+
+ggsave(file=paste0(folder_path_save, "/AVARS_Figure_S9_Final.pdf"))
+dev.off()
+
+temp_order<-unique(temp_hits %>% select(c(species_wrapped,family_label))) %>% arrange(family_label)
+ggplot(temp_hits %>% filter(family_label %in% c("Adenoviridae","Herpesviridae","Other DNA virus"))) +
+  geom_line(aes(x = Age_Years,
+                y = n_hits,
+                colour = family_label,
+                group  = donor),
+            size = 0.25) +
+  facet_wrap(~ factor(species_wrapped, levels = c(temp_order$species_wrapped)),
+             scales = "free_y") +
+  xlab("Age (years)") +
+  ylab("Number of\npeptides targeted") +
+  scale_color_manual(
+    name   = "Viral\nfamily",
+    values = pal1[c(1,9,3:8)],
+    breaks = c("Other DNA virus","Herpesviridae","Picornaviridae",
+               "Orthomyxoviridae","Pneumoviridae","Adenoviridae",
+               "Coronaviridae","Paramyxoviridae")
+  ) +
+  guides(
+    colour = guide_legend(
+      override.aes = list(size = 4),reverse = TRUE   # <-- here!
+    )
+  ) +
+  theme_minimal() +
+  theme(
+    text            = element_text(family = "Helvetica", size = 7),
+    legend.position = "top",
+    panel.grid      = element_blank(),
+    panel.border    = element_rect(color = "black", fill = NA),
+    strip.text      = element_text(size = 7),
+    legend.title    = element_text(size = 7),
+    legend.text     = element_text(size = 7),
+    axis.text       = element_text(size = 7),
+    axis.title      = element_text(size = 7)
+  )
+ggsave(file=paste0(folder_path_save, "/AVARS_Figure_S10_Final.pdf"))
+dev.off()
+```

@@ -1,0 +1,78 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+easypackages::libraries(c("readr","readxl","dplyr","tidyr","ggplot2","ggpubr","forcats","data.table","pheatmap"))
+# insert path to folders
+directory_path <- "" # CHANGE THIS to path to director enclosing code and data sets
+folder_path <- paste0(directory_path, "/Supplemental Tables/") # folder containing downloaded data sets
+intermediate_folder_path <- paste0(directory_path, "/Intermediate Files Used in Plots/") # path containing intermediate outputs
+folder_path_save <- paste0(directory_path, "/Figure_Panels_for_Illustrator/")# define folder path to save images to
+folder_path_code <- paste0(directory_path, "/Functions and General Analysis Code/") # change this to folder containing downloaded functions and code
+
+# Read in data
+combined_metadata_dist <- read_csv(paste0(folder_path,"Data Table S1.csv"))
+all_zs_combined <- read_csv(paste0(folder_path,"Data Table S2.csv"))
+Viral_Annotations <- read_csv(paste0(folder_path,"Data Table S4.csv"))
+immunoprint_Val <- read_csv(paste0(intermediate_folder_path, "Immunoprint_Validation_seed10.csv"))
+source(paste0(folder_path_code,"Immunoprint functions.R"))
+pal1<-c("#F87E2E", "#FFEC33", "#1FAA79", "#14C4F8", "#0077C8", "#9870F5", "#D53EE1", "#FF36B0", "#D72638", "#6E6E6E")
+
+# Prepare data for heatmap
+set.seed(5)
+tlist<-combined_metadata_dist %>% select(c(donor,Age_Years)) %>% distinct()%>% group_by(donor) %>% summarise(n_samps=max(row_number()),age_range=max(Age_Years)-min(Age_Years)) %>% ungroup()%>% filter(n_samps==3,age_range>5)%>% sample_n(5) %>% left_join(combined_metadata_dist)%>%arrange(donor,Age_Years) 
+tdat<-all_zs_combined %>% select(c(id,all_of(tlist$identifier))) %>% bound_Z()
+tdatpub<-tdat%>%left_join(Viral_Annotations%>%select(c(id,public_epitope_2015)))%>%filter(public_epitope_2015==TRUE)%>%select(-public_epitope_2015)
+tcor<-cor(tdatpub%>%select(-id),tdatpub%>%select(-id))
+anno=data.frame(Donor=factor(rep(c("1","2","3","4","5"),each=3)))
+rownames(anno)<-rownames(tcor)
+tcor[upper.tri(tcor)] <- NA # Make upper triangle white since symmetric
+```
+
+```{r,fig.height=4,fig.width=4}
+# for legend
+pp<-pheatmap(tcor,show_rownames = FALSE,cluster_rows = FALSE,cluster_cols = FALSE,annotation_col = anno,annotation_colors = list(Donor = c("1"="#0077C8","2"="#D53EE1","3"="#9870F5","4"="#1FAA79","5"="#6E6E6E"))[1],annotation_row = anno,show_colnames = FALSE,border_color = NA,color = colorRampPalette(c("white","#14C4F8","#FF36B0"))(1500),breaks = seq(-0.5,1,0.001),na_col = "white")
+pdf(file=paste0(folder_path_save,"/ImmunoPrint_Supp_Heatmap_legend.pdf"))
+pp
+dev.off()
+rm(pp)
+# For main plot
+pp<-pheatmap(tcor,show_rownames = FALSE,cluster_rows = FALSE,cluster_cols = FALSE,annotation_col = anno,annotation_colors = list(Donor = c("1"="#0077C8","2"="#D53EE1","3"="#9870F5","4"="#1FAA79","5"="#6E6E6E"))[1],annotation_row = anno,show_colnames = FALSE,border_color = NA,color = colorRampPalette(c("white","#14C4F8","#FF36B0"))(1500),breaks = seq(-0.5,1,0.001),na_col = "white",legend = FALSE,annotation_legend = FALSE)
+pdf(file=paste0(folder_path_save,"/Fig_S3_C.pdf"))
+pp
+dev.off()
+rm(pp)
+
+```
+
+# Plot validation results
+```{r, fig.width=3.75,fig.height=1.875}
+fig_s3_e<-ggplot(immunoprint_Val, aes(x = Score, fill = label)) +
+  geom_density(alpha = 0.45, linewidth = 0.4) +
+  scale_fill_manual(
+    values = c(
+      "Same individual" = pal1[4],
+      "Different individuals" = pal1[7]
+    )
+  ) +
+  theme_minimal() +
+  theme(
+    text = element_text(family = "Helvetica"),
+    legend.position = "right",
+    panel.grid = element_blank(),
+    panel.border = element_rect(fill = NA, colour = "black"),
+    axis.title = element_text(size = 9),
+    axis.text = element_text(size = 9),
+  ) +
+  xlab("Immunoprint score") +
+  ylab("Density") +
+  coord_cartesian(xlim = c(0, 1)) + 
+  geom_vline(xintercept = 0.76, linetype = "dashed", linewidth = 0.4)
+
+pdf(file=paste0(folder_path_save,"/Fig_S3_E.pdf"), width=3.75,height = 1.875)
+fig_s3_e
+dev.off
+```
+

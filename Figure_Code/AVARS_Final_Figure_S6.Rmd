@@ -1,0 +1,172 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+
+```{r}
+easypackages::libraries(c("readr","readxl","dplyr","tidyr","ggplot2","ggpubr","UpSetR","cowplot","grid","ggplotify"))
+
+# insert path to folders
+directory_path <- "" # CHANGE THIS to path to director enclosing code and data sets
+folder_path <- paste0(directory_path, "/Supplemental Tables/") # folder containing downloaded data sets
+intermediate_folder_path <- paste0(directory_path, "/Intermediate Files Used in Plots/") # path containing intermediate outputs
+
+# Load Supplemental Data
+Vaccination_Data <- read_csv(paste0(folder_path,"Data Table S7.csv"))
+age_at_exposure <- read_csv(paste0(intermediate_folder_path,"circle_plot_data_figure_5.csv")) # Generated in "Generate Circle Plot Data.R"
+virus_key_5D <- read_csv(paste0(intermediate_folder_path,"virus_key_figure_5.csv")) # Generated in "Generate Circle Plot Data.R"
+
+
+# Load custom functions
+folder_path_code <- paste0(directory_path, "/Functions and General Analysis Code/") # change this to folder containing downloaded functions and code
+source(paste0(folder_path_code,"Immunoprint functions.R"))
+
+pal1<-c("#F87E2E", "#FFEC33", "#1FAA79", "#14C4F8", "#0077C8", "#9870F5", "#D53EE1", "#FF36B0", "#D72638", "#6E6E6E")
+```
+
+# Prepare Plot Dataa for Figure S6
+```{r}
+temp_donors<-age_at_exposure %>% select(c(donor,Age_Years_2)) %>% distinct() %>% group_by(donor) %>% summarise(max_age=max(Age_Years_2)) %>% arrange(desc(max_age)) %>% filter(max_age>2.5) # Restrict to donors with follow up past 2.5 years old
+
+# Distribute ages across interval for visualization
+age_at_exposure_plot<-age_at_exposure %>% filter(donor %in% temp_donors$donor) %>% group_by(Age_Years_1,Age_Years_2,donor) %>% mutate(age_mod=seq(from = Age_Years_1[1]+0.1, to = Age_Years_2[1],length.out=max(row_number())))
+
+# Make measles and rubella occur at the same time
+age_at_exposure_plot<-age_at_exposure_plot %>% mutate(age_mod=ifelse(spec_label %in% c("Rubivirus rubellae", "Measles morbillivirus"),(Age_Years_1+Age_Years_2)/2,age_mod)) %>% arrange(Age_Years_2) %>% mutate(ymod=runif(n=max(row_number()), min=3, max=6))
+
+age_at_exposure_plot$spec_label <- factor(age_at_exposure_plot$spec_label,
+                           levels = virus_key_5D$spec_label)
+
+# Vary y positions for visualization
+
+age_at_exposure_plot<-age_at_exposure_plot %>% mutate(age_mod=ifelse(spec_label %in% c("Rubivirus rubellae", "Measles morbillivirus"),(Age_Years_1+Age_Years_2)/2,age_mod)) %>% arrange(Age_Years_2)
+counter=1
+for (i in seq(age_at_exposure_plot$age_mod)) {
+  if (counter==1) {
+    age_at_exposure_plot$ymod[i] <- 4
+    counter <- 2
+  } else if (counter == 2) {
+    age_at_exposure_plot$ymod[i] <- 5
+    counter <- 3
+  } else if (counter == 3) {
+    age_at_exposure_plot$ymod[i] <- 6
+    counter <- 4
+  } else if (counter == 4) {
+    age_at_exposure_plot$ymod[i]<- 5
+    counter <-1
+  }
+}
+
+species_shapes <- setNames(virus_key_5D$shape_label, virus_key_5D$spec_label)
+species_cols   <- setNames(virus_key_5D$colour,      virus_key_5D$spec_label)
+```
+
+```{r, fig.height=8,fig.width=7.1}
+folder_path_save <- paste0(directory_path, "/Complete Figures/")
+
+ggplot(age_at_exposure_plot, 
+       aes(x = age_mod, y = ymod, colour = spec_label, shape = spec_label)) +
+  geom_segment(aes(xend = age_mod, y = 0, yend = ymod), alpha = 0.6) +
+  geom_point(size = 2) +
+  xlim(c(0,3.25)) +
+  ylim(c(0,6)) +
+  coord_polar(theta = "x")  +
+
+  scale_colour_manual(name = "Virus", values = species_cols) +
+  scale_shape_manual(name  = "Virus", values = species_shapes) +
+
+  guides(
+    colour = guide_legend(
+      nrow        = 7,           # wrap into 2 rows
+      byrow       = TRUE,        # fill each row left→right
+      direction   = "horizontal",# lay keys out horizontally
+      title.position = "top"     # put “Virus” title above symbols
+    ),
+    shape  = guide_legend(
+      nrow        = 7,
+      byrow       = TRUE,
+      direction   = "horizontal",
+      title.position = "top"
+    )
+  ) +
+
+  theme_minimal() +
+  theme(
+    text             = element_text(family = "Helvetica", color = "black", size =7),
+    axis.text.y      = element_blank(),
+    axis.ticks       = element_blank(),
+    axis.title.y     = element_blank(),
+    axis.text.theta  = element_text(size = 7, color = "black"),
+    legend.position  = "top",
+    legend.direction = "horizontal",  # ensure the box is horizontal
+    legend.box       = "horizontal",  # if multiple legends, keep them side by side
+    legend.text      = element_text(size = 6),
+    legend.title     = element_text(size = 7),
+    legend.key.height = unit(0.3, "lines"),   
+    legend.spacing.y  = unit(1.2, "lines")
+  ) +
+
+  xlab("Age (years)") +
+  facet_wrap(~donor, ncol = 5)
+
+ggsave(file=paste0(folder_path_save, "/AVARS_Figure_S6_Final.pdf"))
+dev.off()
+```
+# Statistics
+## Number of exposures
+```{r}
+# Number of exposures
+birth_to_3_exposures<-age_at_exposure_plot %>% group_by(donor) %>% summarise(n_exposures=max(row_number()))
+birth_to_3_exposures
+age_at_exposure_plot
+shapiro.test(birth_to_3_exposures$n_exposures) # No evidence to suggest data deviates from normality
+mean_ci(birth_to_3_exposures$n_exposures)
+birth_to_3_exposures %>%
+  summarise(
+    N      = n(),
+    Median = median(n_exposures, na.rm = TRUE),
+    Q1     = quantile(n_exposures, 0.25, na.rm = TRUE),
+    Q3     = quantile(n_exposures, 0.75, na.rm = TRUE),
+    IQR    = IQR(n_exposures, na.rm = TRUE)
+  )
+range(birth_to_3_exposures$n_exposures)
+length(unique(age_at_exposure_plot$spec_label))
+```
+# Distinct exposures
+```{r}
+age_at_exposure_plot %>% select(c(donor,spec_label)) %>% distinct()%>% group_by(donor) %>% summarise(n_exposures=max(row_number())) %>% ungroup()%>%
+  summarise(
+    N      = n(),
+    Median = median(n_exposures, na.rm = TRUE),
+    Mean   = mean(n_exposures),
+    Q1     = quantile(n_exposures, 0.25, na.rm = TRUE),
+    Q3     = quantile(n_exposures, 0.75, na.rm = TRUE),
+    IQR    = IQR(n_exposures, na.rm = TRUE),
+    Min    = min(n_exposures),
+    Max    = max(n_exposures),
+    ci_low = mean_ci(n_exposures)[[2]],
+    ci_high =mean_ci(n_exposures)[[3]]
+  )
+```
+
+# Without Vaccines
+```{r}
+unique(age_at_exposure_plot$spec_label)
+# vaccine viruses are c("Rubivirus rubellae","Measles morbillivirus", "Hepatovirus A","Rotavirus A","Enterovirus C","Influenza A/B")
+age_at_exposure_plot %>% select(c(donor,spec_label)) %>% filter(!spec_label %in% c("Rubivirus rubellae","Measles morbillivirus", "Hepatovirus A","Rotavirus A","Enterovirus C","Influenza A/B","Human orthorubulavirus 4","Hepatitis B virus")) %>% distinct()%>% group_by(donor) %>% summarise(n_exposures=max(row_number()))%>%
+  summarise(
+    N      = n(),
+    Median = median(n_exposures, na.rm = TRUE),
+    Mean   = mean(n_exposures),
+    Q1     = quantile(n_exposures, 0.25, na.rm = TRUE),
+    Q3     = quantile(n_exposures, 0.75, na.rm = TRUE),
+    IQR    = IQR(n_exposures, na.rm = TRUE),
+    Min    = min(n_exposures),
+    Max    = max(n_exposures),
+    ci_low = mean_ci(n_exposures)[[2]],
+    ci_high =mean_ci(n_exposures)[[3]]
+  )
+```
+

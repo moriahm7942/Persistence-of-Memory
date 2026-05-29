@@ -1,0 +1,252 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+easypackages::libraries(c("readr","readxl","dplyr","tidyr","ggplot2","ggpubr","UpSetR","cowplot","grid","ggplotify","data.table","gtable"))
+
+# insert path to folders
+directory_path <- "" # CHANGE THIS to path to director enclosing code and data sets
+folder_path <- paste0(directory_path, "/Supplemental Tables/") # folder containing downloaded data sets
+intermediate_folder_path <- paste0(directory_path, "/Intermediate Files Used in Plots/") # path containing intermediate outputs
+folder_path_save <- paste0(directory_path, "/Complete Figures/")# define folder path to save images to
+folder_path_code <- paste0(directory_path, "/Functions and General Analysis Code/") # change this to folder containing downloaded functions and code
+
+# Load Supplemental Data
+combined_metadata_dist <- read_csv(paste0(folder_path,"Data Table S1.csv"))
+all_zs_combined <- read_csv(paste0(folder_path,"Data Table S2.csv"))
+all_hits_combined <- read_csv(paste0(folder_path,"Data Table S3.csv"))
+Viral_Annotations <- read_csv(paste0(folder_path,"Data Table S4.csv"))
+source(paste0(folder_path_code,"Immunoprint functions.R"))
+
+pal1<-c("#F87E2E", "#FFEC33", "#1FAA79", "#14C4F8", "#0077C8", "#9870F5", "#D53EE1", "#FF36B0", "#D72638", "#6E6E6E")
+```
+
+# Fig 3A
+```{r}
+set.seed(3)
+temp_donors<-combined_metadata_dist%>% filter(adult_long==TRUE) %>% select(c(donor,Age_Years)) %>% distinct()%>% group_by(donor) %>% summarise(n_samps=max(row_number()),age_range=max(Age_Years)-min(Age_Years)) %>% ungroup()%>% filter(n_samps==3,age_range>5)%>% sample_n(4) %>% select(donor) %>% unlist() %>% unname()
+
+fig3_Zs<-all_zs_combined %>% select(c(id,combined_metadata_dist$identifier[combined_metadata_dist$donor %in% temp_donors])) 
+
+fig3_Zs<-fig3_Zs%>% bound_Z()%>% pivot_longer(-id,names_to = "identifier",values_to = "ZScore") %>% mutate(hit=ifelse(ZScore>3.5,1,0))
+temp_peps<-fig3_Zs %>% group_by(id) %>% summarise(n_hits=sum(hit)) %>% filter(n_hits>1) #3185 peptides
+fig3_Zs<- fig3_Zs %>% filter(id %in% temp_peps$id)
+head(fig3_Zs)
+fig3_Zs<-fig3_Zs %>% left_join(combined_metadata_dist %>% select(c(identifier,donor,samp,Years_from_index,Age_Years))) %>% mutate(labelx=paste0(donor,": Age ",Age_Years))
+
+tempposition<-unique(fig3_Zs %>% select(-c(id,ZScore,hit))) %>% arrange(donor,Age_Years) %>% mutate(samp_number=row_number())
+fig3_Zs<-fig3_Zs %>% left_join(tempposition)
+
+temp_peps<-fig3_Zs %>% select(id) %>% left_join(Viral_Annotations %>% select(c(id,family,family_label,species))) %>% distinct() %>% filter(family_label!="Other") %>% arrange(family,species,id)
+Fig_3_A<-ggplot(fig3_Zs %>% filter(id %in% temp_peps$id))+geom_tile(aes(x=samp_number,y=factor(id,levels=c(temp_peps$id)),fill=ZScore))+facet_wrap(~donor,scales = "free_x",nrow=1)+scale_fill_gradientn("Bounded\nMean EBS",colours = c("white",pal1[6]),breaks=c(0,5,10,15))+ylab("VirScan Peptide")+theme_minimal()+ theme(text=element_text(family="Helvetica", color="black", size=7),axis.text.y=element_blank(),axis.text.x=element_text(angle = 90),axis.ticks = element_blank(),legend.position = "right",axis.title.x = element_blank(), axis.title = element_text(size=7),legend.title = element_text(size=7), panel.spacing = unit(0,'lines'), panel.border = element_rect(color = "black", fill = NA)) + scale_x_continuous(breaks = unique(tempposition$samp_number), labels=paste0("Age ",floor(tempposition$Age_Years+0.5)), expand = c(0,0))
+Fig_3_A
+```
+
+# Panels B and C
+```{r}
+fig3_Zs
+temp_meta <- combined_metadata_dist %>% filter(identifier %in% fig3_Zs$identifier)
+pairs_from_fig3A <- tidyr::crossing("identifier_1"=temp_meta$identifier,"identifier_2"=temp_meta$identifier) %>% left_join(temp_meta %>% mutate(identifier_1=identifier,donor_1=donor,Age_1=Age_Years) %>% select(c(identifier_1,donor_1,Age_1))) %>% left_join(temp_meta %>% mutate(identifier_2=identifier,donor_2=donor,Age_2=Age_Years) %>% select(c(identifier_2,donor_2,Age_2))) %>% filter(identifier_1!=identifier_2)
+set.seed(3)
+pairs_for_plot <- pairs_from_fig3A %>% filter(donor_1!=donor_2) %>% group_by(donor_1) %>% sample_n(1) %>% ungroup() %>% sample_n(2) %>% bind_rows(pairs_from_fig3A %>% filter(donor_1==donor_2,abs(Age_1-Age_2)>5) %>% group_by(donor_1) %>% sample_n(1) %>% ungroup() %>% sample_n(2))
+fig3_Zs<-all_zs_combined %>% select(c(id,combined_metadata_dist$identifier[combined_metadata_dist$donor %in% temp_donors])) 
+
+make_pair_plot <- function(df, xcol, ycol, point_col, xlab_txt, ylab_txt) {
+  ggplot(df, aes(x = .data[[xcol]], y = .data[[ycol]])) +
+    geom_point(alpha = 0.5, color = point_col) +
+    stat_cor(
+      aes(label = ..r.label..),
+      label.x = 3,
+      method = "pearson",
+      size = 2.2
+    ) +
+    theme_minimal() +
+    theme(
+      text = element_text(family = "Helvetica", color = "black", size = 7),
+      axis.title = element_text(size = 7),
+      axis.text  = element_text(size = 6)
+    ) +
+    coord_equal() +
+    xlab(xlab_txt) + ylab(ylab_txt) +
+    xlim(c(-10, 600)) + ylim(c(-10, 600))
+}
+
+# ensure numeric (except id)
+fig3_Zs <- fig3_Zs %>% mutate(across(-id, as.numeric))
+
+p1 <- make_pair_plot(fig3_Zs,
+  xcol = pairs_for_plot$identifier_1[1],
+  ycol = pairs_for_plot$identifier_2[1],
+  point_col = pal1[8],
+  xlab_txt = "EBS for Individual 1",
+  ylab_txt = "EBS for Individual 2"
+)
+
+p2 <- make_pair_plot(fig3_Zs,
+  xcol = pairs_for_plot$identifier_1[2],
+  ycol = pairs_for_plot$identifier_2[2],
+  point_col = pal1[8],
+  xlab_txt = "EBS for Individual 3",
+  ylab_txt = "EBS for Individual 4"
+)
+
+p3 <- make_pair_plot(fig3_Zs,
+  xcol = pairs_for_plot$identifier_1[4],
+  ycol = pairs_for_plot$identifier_2[4],
+  point_col = pal1[6],
+  xlab_txt = "EBS at baseline",
+  ylab_txt = "EBS at year 5"
+)
+
+p4 <- make_pair_plot(fig3_Zs,
+  xcol = pairs_for_plot$identifier_1[3],
+  ycol = pairs_for_plot$identifier_2[3],
+  point_col = pal1[6],
+  xlab_txt = "EBS at baseline",
+  ylab_txt = "EBS at year 8"
+)
+
+Fig_3_BC <- ggarrange(
+  ggarrange(p1, p2, ncol = 2),
+  ggarrange(p3, p4, ncol = 2),
+  ncol = 2,
+  labels = c("b", "c"),
+  font.label = list(family="Helvetica",size=8)
+)
+
+Fig_3_BC
+```
+# Panel D and E
+Correlation files generated in Calc_Correlation_Script.R
+```{r}
+complete_repertoire_all_samples_cor <- read_csv(paste0(intermediate_folder_path,"complete_repertoire_all_samples_cor.csv"))
+head(complete_repertoire_all_samples_cor)
+complete_repertoire_all_samples_cor<-complete_repertoire_all_samples_cor %>% left_join(combined_metadata_dist %>% mutate(sample1=identifier,donor1=donor,Age_1=Age_Years,donor_lab_1=paste0(donor,": age ",Age_Years),samp1=samp) %>% select(c(sample1,donor1,Age_1,donor_lab_1,samp1)))%>% left_join(combined_metadata_dist %>% mutate(sample2=identifier,donor2=donor,Age_2=Age_Years,donor_lab_2=paste0(donor,": age ",Age_Years),samp2=samp) %>% select(c(sample2,donor2,Age_2,donor_lab_2,samp2)))
+complete_repertoire_all_samples_cor<- complete_repertoire_all_samples_cor %>% mutate(comp_label=ifelse(donor1==donor2,"Same donor","Different donors"))
+
+temp_samples<-combined_metadata_dist$identifier[combined_metadata_dist$imm_dev==TRUE]
+Itrain_rep_cor<-complete_repertoire_all_samples_cor %>% filter(sample1 %in% temp_samples,sample2 %in% temp_samples) %>% filter(!(abs(Age_1-Age_2)<=5&donor1==donor2))
+head(Itrain_rep_cor)
+Fig_3_D <- ggplot(Itrain_rep_cor)+geom_density(alpha=0.5,aes(after_stat(ndensity),fill=comp_label,color=comp_label,x=cor_complete))+theme(text=element_text(family="Helvetica", size=7),legend.position = "top",panel.background = element_blank(),panel.grid = element_blank(),axis.title=element_text(size=8),axis.text = element_text(size=6),legend.title = element_text(size=7),legend.text = element_text(size=6))+xlim(c(-0.5,1))+xlab("Complete Repertoire Correlation")+ylab("Scaled density")+scale_fill_manual(name="Comparison between",values=c(pal1[c(8,6)]))+scale_color_manual(name="Comparison between",values=c(pal1[c(8,6)]))
+Fig_3_D
+
+pub2015_repertoire_all_samples_cor <- read_csv(paste0(intermediate_folder_path,"pub2015_repertoire_all_samples_cor.csv"))
+pub2015_repertoire_all_samples_cor<-pub2015_repertoire_all_samples_cor %>% left_join(combined_metadata_dist %>% mutate(sample1=identifier,donor1=donor,Age_1=Age_Years,donor_lab_1=paste0(donor,": age ",Age_Years),samp1=samp) %>% select(c(sample1,donor1,Age_1,donor_lab_1,samp1)))%>% left_join(combined_metadata_dist %>% mutate(sample2=identifier,donor2=donor,Age_2=Age_Years,donor_lab_2=paste0(donor,": age ",Age_Years),samp2=samp) %>% select(c(sample2,donor2,Age_2,donor_lab_2,samp2)))
+pub2015_repertoire_all_samples_cor<- pub2015_repertoire_all_samples_cor %>% mutate(comp_label=ifelse(donor1==donor2,"Same donor","Different donors"))
+
+Itrain_pub2015_cor<-pub2015_repertoire_all_samples_cor %>% filter(sample1 %in% temp_samples,sample2 %in% temp_samples) %>% filter(!(abs(Age_1-Age_2)<=5&donor1==donor2))
+head(Itrain_pub2015_cor)
+Fig_3_E<-ggplot(Itrain_pub2015_cor)+geom_density(alpha=0.5,aes(after_stat(ndensity),fill=comp_label,color=comp_label,x=cor_pub))+theme(text=element_text(family="Helvetica", size=7),legend.position = "top",panel.background = element_blank(),panel.grid = element_blank(),axis.title=element_text(size=7),axis.text = element_text(size=6),legend.title = element_text(size=8),legend.text = element_text(size=6))+xlim(c(-0.5,1))+xlab("Public Epitope Correlation")+ylab("Scaled density")+scale_fill_manual(name="Comparison between",values=c(pal1[c(8,6)]))+scale_color_manual(name="Comparison between",values=c(pal1[c(8,6)]))
+Itrain_rep_cor %>% filter(cor_complete<0.5,comp_label=="Same donor")
+length(unique(c(Itrain_rep_cor$sample1,Itrain_rep_cor$sample2)))
+length(unique(c(Itrain_rep_cor$donor1,Itrain_rep_cor$donor2)))
+Fig_3_E
+```
+
+# Panel F
+```{r}
+Fig_3_F<-ggplot(complete_repertoire_all_samples_cor %>% filter(donor1==donor2,Age_1>18))+geom_point(aes(x=abs(Age_1-Age_2),y=cor_complete,color=pmin(Age_1,Age_2)))+theme_minimal()+ylim(c(0,1))+xlab("Sampling interval (years)")+ylab("Repertoire correlation")+scale_color_gradientn(name="Age in years\nat initial sampling",colors=c(pal1[c(4,6:8)]))+theme(text=element_text(family="Helvetica", size=7),legend.position = "top",axis.title=element_text(size=7))
+Fig_3_F
+```
+
+# Panel G
+```{r}
+#overall correlation over time
+consec_cor_complete<-read_csv(paste0(intermediate_folder_path,"complete_repertoire_all_samples_cor.csv"))#%>% filter(sample1!="C3_D570_S1")
+consec_cor_complete<-consec_cor_complete %>%filter(sample1!=sample2) %>%left_join(combined_metadata_dist%>%mutate(sample2=identifier,donor2=donor,Visit_Year2=Visit_Year,samp2=samp)%>% ungroup %>% select(c(sample2,donor2,Visit_Year2,samp2)))%>%left_join(combined_metadata_dist%>%mutate(sample1=identifier,donor1=donor,Visit_Year1=Visit_Year,samp1=samp)%>% ungroup %>% select(c(sample1,donor1,Visit_Year1,samp1)))%>%mutate(label=ifelse(donor1==donor2,"Same individual","Different individuals"),years_between=abs(Visit_Year1-Visit_Year2))#filter out repeat comparisons and join to metadata
+
+consec_cor_complete<-consec_cor_complete %>% filter(label=="Same individual")%>% mutate(samp1_num=as.numeric(substring(samp1,2,2)),samp2_num=as.numeric(substring(samp2,2,2)))%>% filter(abs(samp1_num-samp2_num)==1) %>% filter(!is.na(years_between),Visit_Year2!=Visit_Year1)%>% mutate(decay_rate=(1-cor_complete)/years_between) # only interested in within individual
+head(consec_cor_complete)
+
+ggplot(consec_cor_complete)+geom_boxplot(aes(x="Adult",y=cor_complete))+ylim(c(0,1))
+
+
+consec_cor_complete_ped<-read_csv(paste0(intermediate_folder_path,"complete_repertoire_all_samples_cor.csv"))
+temp_donors<-combined_metadata_dist %>% filter(ped_long_1==TRUE|ped_long_2==TRUE) %>% select(donor) %>% distinct() %>% unlist() %>% unname()
+temp_meta<-combined_metadata_dist %>% filter(donor %in% temp_donors) %>% mutate(Visit_Year=round(Age_Years,1))
+consec_cor_complete_ped<-consec_cor_complete_ped %>%filter(sample1!=sample2) %>%left_join(temp_meta%>%mutate(sample2=identifier,donor2=donor,Visit_Year2=Visit_Year,samp2=samp)%>% ungroup %>% select(c(sample2,donor2,Visit_Year2,samp2)))%>%left_join(temp_meta%>%mutate(sample1=identifier,donor1=donor,Visit_Year1=Visit_Year,samp1=samp)%>% ungroup %>% select(c(sample1,donor1,Visit_Year1,samp1)))%>%mutate(label=ifelse(donor1==donor2,"Same individual","Different individuals"),years_between=abs(Visit_Year1-Visit_Year2))#filter out repeat comparisons and join to metadata
+consec_cor_complete_ped<-consec_cor_complete_ped %>% filter(!is.na(donor1),!is.na(donor2))
+
+consec_cor_complete_ped<-consec_cor_complete_ped %>% filter(label=="Same individual")%>% mutate(samp1_num=as.numeric(substring(samp1,2,2)),samp2_num=as.numeric(substring(samp2,2,2)))%>% filter(abs(samp1_num-samp2_num)==1) %>% filter(!is.na(years_between),Visit_Year2!=Visit_Year1) %>% mutate(decay_rate=(1-cor_complete)/years_between)%>% mutate(min_age=pmin(Visit_Year2,Visit_Year1),max_age=pmax(Visit_Year2,Visit_Year1)) # only interested in within individual
+
+# bins are birth, 1 year, 2 years, 3 years, 4 years, 5 years, 6, 7, 8, 9, 10-12
+binned_consec_cor_complete_ped<-consec_cor_complete_ped %>% mutate(ped_closest_min_age=round(min_age,0))%>% mutate(ped_closest_min_age=ifelse(ped_closest_min_age %in% c(11,12,13),10,ped_closest_min_age)) %>% mutate(dist_from_bin=abs(min_age-ped_closest_min_age),bin_difference=abs(min_age-ped_closest_min_age)) 
+# Make sure only one comparison for that donor per bin
+temp<-binned_consec_cor_complete_ped %>% select(c(donor1,sample1,sample2,ped_closest_min_age,min_age,max_age,dist_from_bin)) %>% distinct() %>% group_by(donor1,ped_closest_min_age,max_age) %>%arrange(dist_from_bin) %>% slice_head(n=1) 
+# because consecutive not totally independent
+binned_consec_cor_complete_ped<-temp %>% left_join(binned_consec_cor_complete_ped)
+head(binned_consec_cor_complete_ped)
+ggplot(binned_consec_cor_complete_ped)+geom_point(aes(x=min_age,y=donor1))
+
+
+binned_consec_cor_complete_ped<-binned_consec_cor_complete_ped %>% group_by(donor1,ped_closest_min_age) %>% summarise(avg_decay=mean(decay_rate)) %>% ungroup() # averages if multiple in bin
+avg_binned_consec_cor_complete_ped<-binned_consec_cor_complete_ped %>% group_by(ped_closest_min_age) %>% summarise(avg_decay2=mean(avg_decay))
+avg_binned_consec_cor_complete_ped
+Fig_3_G<-ggplot(binned_consec_cor_complete_ped)+geom_violin(aes(x=as.factor(ped_closest_min_age),y=avg_decay),alpha=0.6,fill=pal1[7])+theme_minimal()+geom_line(data=avg_binned_consec_cor_complete_ped,aes(x=ped_closest_min_age+1,y=avg_decay2),color=pal1[7])+theme_minimal()+theme(text=element_text(family="Helvetica", size=7), legend.position = "none",panel.grid=element_blank(),axis.title=element_text(size=7),panel.border = element_rect(fill = NA, colour = "black")) +ylab("Annual decrease in\nrepertoire correlation") +xlab("Age (years)")+ylim(c(0,2.2))+geom_violin(data=consec_cor_complete,aes(x="Adult",y=decay_rate),alpha=0.6,fill=pal1[4])
+
+Fig_3_G
+mean(consec_cor_complete$decay_rate)
+
+```
+
+
+```{r}
+
+# set fontsize only for axis-title grobs in a gtable returned by ggarrange
+.set_text_fontsize <- function(grob, size = 7) {
+  if (inherits(grob, "text")) {
+    grob$gp$fontsize <- size
+  }
+
+  if (!is.null(grob$children)) {
+    grob$children <- lapply(grob$children, .set_text_fontsize, size = size)
+  }
+
+  if (!is.null(grob$grobs)) {
+    grob$grobs <- lapply(grob$grobs, .set_text_fontsize, size = size)
+  }
+
+  grob
+}
+
+force_axis_title_size <- function(g, size = 7) {
+  # ggarrange returns a gtable; if it's a ggplot convert first
+  if (inherits(g, "ggplot")) g <- ggplotGrob(g)
+
+  if (!inherits(g, "gtable")) return(g)
+
+  axis_title_slots <- c("xlab-b", "xlab-t", "ylab-l", "ylab-r")
+
+  idx <- which(g$layout$name %in% axis_title_slots)
+  for (i in idx) {
+    g$grobs[[i]] <- .set_text_fontsize(g$grobs[[i]], size = size)
+  }
+  g
+}
+Fig_DE <- ggarrange(Fig_3_D, Fig_3_E, labels = c("d","e"), common.legend = TRUE,font.label = list(family="Helvetica",size=8))
+Fig_FG <- ggarrange(Fig_3_F+theme(legend.title = element_text(size=7)), Fig_3_G, labels = c("f","g"),font.label = list(family="Helvetica",size=8))
+```
+
+# Combined
+```{r,fig.width=7,fig.height=7.5}
+final_fig3 <- ggarrange(
+  Fig_3_A +theme(legend.title = element_text(size=7)),
+  Fig_3_BC,
+  Fig_DE,
+  Fig_FG,
+  labels = c("a","","",""),
+  ncol = 1,
+  heights = c(1, 1, 1, 1.25),
+  font.label = list(family="Helvetica",size=8)
+)
+final_fig3
+# force all axis-title sizes to 8 in the assembled gtable
+final_fig3_fixed <- force_axis_title_size(final_fig3, size = 7)
+
+ggsave(file = paste0(folder_path_save, "AVARS_Figure_3_Final.pdf"))
+as.ggplot(final_fig3_fixed)
+dev.off()
+
+```
