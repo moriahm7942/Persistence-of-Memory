@@ -1,0 +1,212 @@
+
+---
+title: "Figure_1_Table_1-2"
+output:
+  github_document:
+    toc: false
+---
+
+```{r}
+easypackages::libraries(c(
+  "readr", "readxl", "dplyr", "tidyr", "ggplot2",
+  "ggpubr", "forcats", "here"
+))
+
+# Project paths
+# This assumes the repository has been cloned and this notebook is being run
+# from within the Persistence-of-Memory project.
+directory_path <- here::here()
+folder_path <- file.path(directory_path, "Supplemental Tables")
+folder_path_save <- file.path(directory_path, "Figure_Panels_for_Illustrator")
+
+if (!dir.exists(folder_path_save)) {
+  dir.create(folder_path_save, recursive = TRUE)
+}
+
+# Load data
+combined_metadata_dist <- readr::read_csv(file.path(folder_path, "Data Table S1.csv"))
+all_zs_combined <- readr::read_csv(file.path(folder_path, "Data Table S2.csv"))
+all_hits_combined <- readr::read_csv(file.path(folder_path, "Data Table S3.csv"))
+Viral_Annotations <- readr::read_csv(file.path(folder_path, "Data Table S4.csv"))
+
+subset_frame_fxn <- function(wide_df, sample_metadata, dataset_lab) {
+  sample_list <- sample_metadata$identifier[which(sample_metadata[[dataset_lab]] == TRUE)]
+  filtered_df <- wide_df %>% dplyr::select(c(id, sample_list))
+  return(filtered_df)
+}
+
+pal1 <- c(
+  "#F87E2E", "#FFEC33", "#1FAA79", "#14C4F8", "#0077C8",
+  "#9870F5", "#D53EE1", "#FF36B0", "#D72638", "#6E6E6E"
+)
+```
+
+# Table 1
+
+```{r}
+combined_metadata_dist %>%
+  dplyr::group_by(cohort) %>%
+  dplyr::summarise(
+    n_samples = max(row_number()),
+    n_donors = length(unique(donor)),
+    min_age = min(Age_Years),
+    max_age = max(Age_Years)
+  )
+```
+
+# Define Cohorts to Prepare for Fig. 1B and Table 2
+
+```{r}
+temp_dat <- combined_metadata_dist %>%
+  dplyr::filter(adult_long == TRUE | ped_long_1 == TRUE | ped_long_2 == TRUE) %>%
+  dplyr::mutate(color_label = ifelse(ped_long_1 == TRUE, "Pediatric longitudinal 1", "blah")) %>%
+  dplyr::mutate(color_label = ifelse(ped_long_2 == TRUE, "Pediatric longitudinal 2", color_label)) %>%
+  dplyr::mutate(color_label = ifelse(adult_long == TRUE, "Adult longitudinal", color_label)) %>%
+  dplyr::mutate(longgroup = "longitudinal") %>%
+  dplyr::bind_rows(
+    combined_metadata_dist %>%
+      dplyr::filter(adult_cross == TRUE | ped_cross == TRUE) %>%
+      dplyr::mutate(color_label = ifelse(ped_cross == TRUE, "Pediatric cross-sectional", "blah")) %>%
+      dplyr::mutate(color_label = ifelse(adult_cross == TRUE, "Adult cross-sectional", color_label)) %>%
+      dplyr::mutate(longgroup = "cross-sectional", donor = "cross_sectional")
+  )
+
+temp_ord <- temp_dat %>%
+  dplyr::group_by(donor) %>%
+  dplyr::arrange(Age_Years) %>%
+  dplyr::mutate(tempvar = row_number()) %>%
+  dplyr::filter(tempvar == 1)
+
+temp_dat <- temp_dat %>%
+  dplyr::mutate(donor = factor(donor, levels = c(temp_ord$donor))) %>%
+  dplyr::arrange(donor, Age_Years)
+```
+
+# Table 2
+
+```{r}
+# Pediatric Longitudinal 1
+temp_dat %>%
+  dplyr::filter(color_label == "Pediatric longitudinal 1") %>%
+  dplyr::select(c(donor, Sex)) %>%
+  dplyr::distinct() %>%
+  dplyr::mutate(female = ifelse(Sex == "Female", 1, 0)) %>%
+  dplyr::summarise(perc_F = 100 * sum(female) / max(row_number()))
+
+# Pediatric Longitudinal 2
+temp_dat %>%
+  dplyr::filter(color_label == "Pediatric longitudinal 2") %>%
+  dplyr::select(c(donor, Sex)) %>%
+  dplyr::distinct() %>%
+  dplyr::mutate(female = ifelse(Sex == "Female", 1, 0)) %>%
+  dplyr::summarise(perc_F = 100 * sum(female) / max(row_number()))
+
+# Adult cross-sectional
+temp_dat %>%
+  dplyr::filter(color_label == "Adult cross-sectional") %>%
+  dplyr::select(c(identifier, Sex)) %>%
+  dplyr::distinct() %>%
+  dplyr::mutate(female = ifelse(Sex == "Female", 1, 0)) %>%
+  dplyr::summarise(perc_F = 100 * sum(female) / max(row_number()))
+
+# Pediatric cross-sectional
+temp_dat %>%
+  dplyr::filter(color_label == "Pediatric cross-sectional") %>%
+  dplyr::select(c(identifier, Sex)) %>%
+  dplyr::distinct() %>%
+  dplyr::mutate(female = ifelse(Sex == "Female", 1, 0)) %>%
+  dplyr::summarise(perc_F = 100 * sum(female) / max(row_number()))
+
+# Adult longitudinal
+temp_dat %>%
+  dplyr::filter(color_label == "Adult longitudinal") %>%
+  dplyr::select(c(donor, Sex)) %>%
+  dplyr::distinct() %>%
+  dplyr::mutate(female = ifelse(Sex == "Female", 1, 0)) %>%
+  dplyr::summarise(perc_F = 100 * sum(female) / max(row_number()))
+
+# Age distribution, number of samples, and number of donors
+temp_dat %>%
+  dplyr::group_by(color_label) %>%
+  dplyr::summarise(
+    n_samples = max(row_number()),
+    n_donors = length(unique(donor)),
+    min_age = min(Age_Years),
+    max_age = max(Age_Years)
+  )
+```
+
+# Figure 1B
+
+```{r, fig.height=4.5, fig.width=7}
+temp_dat$category_reversed <- forcats::fct_rev(temp_dat$longgroup)
+
+# Pediatric panel
+fig1_A <- ggplot(
+  data = temp_dat %>% dplyr::filter(age_group == "Pediatric"),
+  aes(x = Age_Years, y = donor, color = color_label)
+) +
+  geom_line(
+    data = temp_dat %>% dplyr::filter(longgroup == "longitudinal", age_group == "Pediatric"),
+    alpha = 0.7,
+    linewidth = 1
+  ) +
+  geom_point(pch = 20, alpha = 0.7) +
+  facet_grid(category_reversed ~ ., scales = "free", space = "free_y") +
+  theme_minimal() +
+  theme(
+    text = element_text(family = "Helvetica", colour = "black"),
+    axis.text.y = element_blank(),
+    axis.title = element_blank(),
+    axis.text.x = element_text(size = 8, color = "black"),
+    legend.position = "none",
+    panel.grid = element_blank(),
+    strip.text = element_blank()
+  ) +
+  scale_color_manual(name = "Data set", values = pal1[c(3, 4, 5)]) +
+  xlim(c(0, 15))
+
+fig1_A
+
+# Adult panel
+fig1_B <- ggplot(
+  data = temp_dat %>% dplyr::filter(age_group == "Adult"),
+  aes(x = Age_Years, y = donor, color = color_label)
+) +
+  geom_line(
+    data = temp_dat %>% dplyr::filter(longgroup == "longitudinal", age_group == "Adult"),
+    alpha = 0.7,
+    linewidth = 1
+  ) +
+  geom_point(pch = 20, alpha = 0.7) +
+  facet_grid(category_reversed ~ ., scales = "free", space = "free_y") +
+  theme_minimal() +
+  theme(
+    text = element_text(family = "Helvetica", colour = "black"),
+    axis.text.y = element_blank(),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    axis.text.x = element_text(size = 8, color = "black"),
+    legend.position = "none",
+    panel.grid = element_blank(),
+    strip.text = element_blank()
+  ) +
+  scale_color_manual(name = "Data set", values = pal1[c(6, 8, 7)]) +
+  xlim(c(16, 100))
+
+fig1_B
+
+# Save combined Fig. 1B panel
+Fig1_B_combined <- annotate_figure(
+  ggarrange(fig1_A, fig1_B, widths = c(2, 3)),
+  bottom = text_grob("Age (years)", size = 9, family = "Helvetica"),
+  left = text_grob("Donor", size = 9, family = "Helvetica", rot = 90)
+)
+
+Fig1_B_combined
+
+ggsave(
+  filename = file.path(folder_path_save, "Fig1_B.pdf"),
+  plot = Fig1_B_combined
+)
+```
