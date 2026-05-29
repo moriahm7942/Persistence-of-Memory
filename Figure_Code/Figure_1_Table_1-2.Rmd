@@ -15,7 +15,7 @@ easypackages::libraries(c(
 # from within the Persistence-of-Memory project.
 directory_path <- here::here()
 folder_path <- paste0(directory_path, "/Supplemental Tables/") # folder containing downloaded data sets
-folder_path_save <- paste0(directory_path, "/Figure_Panels_for_Illustrator/") # change to desired folder to save image to
+folder_path_save <- paste0(directory_path, "/Complete Figures/") # change to desired folder to save image to
 
 # Load data
 combined_metadata_dist <- read_csv(paste0(folder_path,"Data Table S1.csv"))
