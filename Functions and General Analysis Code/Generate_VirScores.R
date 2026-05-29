@@ -62,7 +62,8 @@ compared the final score for each virus to the threshold for that virus to deter
 the sample is positive for exposure to that virus"
 # Set file location
 easypackages::libraries(c("dplyr","tidyr","data.table","readr"))
-directory_path <- "~/HMS Dropbox/Moriah Mitchell/Elledge Lab/AVARS 2025/November_2025_Revision" # CHANGE THIS to path to director enclosing code and data sets
+# Define paths relative to the root of the cloned GitHub repository
+directory_path <- here::here()
 folder_path <- paste0(directory_path, "/Supplemental Tables/")
 # import metadata
 combined_metadata<- read_csv(paste0(folder_path,"Data Table S1.csv"))
