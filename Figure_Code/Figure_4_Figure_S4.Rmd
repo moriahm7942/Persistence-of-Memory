@@ -5,7 +5,7 @@ output: html_notebook
 
 ```{r}
 # Load packages
-easypackages::libraries(c("readr","readxl","dplyr","tidyr","ggplot2","ggpubr","UpSetR","cowplot","grid","ggplotify","data.table","plotROC","pROC","lme4", "splines","emmeans","tidytext"))
+easypackages::libraries(c("readr","readxl","dplyr","tidyr","ggplot2","ggpubr","UpSetR","cowplot","grid","ggplotify","data.table","plotROC","pROC","lme4", "splines","emmeans","tidytext","here"))
 
 # insert path to folders
 # Define paths relative to the root of the cloned GitHub repository
