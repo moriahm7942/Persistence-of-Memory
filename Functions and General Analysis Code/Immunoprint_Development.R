@@ -1,11 +1,12 @@
 
 # Load packages
 easypackages::libraries(c(
-  "tidyr","dplyr","data.table","cutpointr","readr"
+  "tidyr","dplyr","data.table","cutpointr","readr", "here"
 ))
 
 # Paths
-directory_path <- "~/HMS Dropbox/Moriah Mitchell/Elledge Lab/AVARS 2025/November_2025_Revision" # CHANGE THIS to path to director enclosing code and data sets
+# Define paths relative to the root of the cloned GitHub repository
+directory_path <- here::here()
 folder_path <- paste0(directory_path, "/Supplemental Tables/") # folder containing downloaded data sets
 intermediate_folder_path <- paste0(directory_path, "/Intermediate Files Used in Plots/") # path containing intermediate outputs
 folder_path_code <- paste0(directory_path, "/Functions and General Analysis Code/") # change this to folder containing downloaded functions and code
