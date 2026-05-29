@@ -38,7 +38,7 @@ Open R (version 4.4.0 or later) and install any missing package dependencies. Al
 
 ### Downloading data files
 
-The data required to reproduce the analyses are available through the Supplementary Materials of the Manuscript. Download all data files and place them in `/Supplemental Tables/` 
+The data required to reproduce the analyses are available through the Supplementary Materials of the Manuscript. Download all data files and place them in the `/Supplemental Tables/` directory.
 
 
 ### Running the code
@@ -66,50 +66,56 @@ When intermediate files are required, this dependency is indicated within the co
 Repository download, package installation, and data download should require approximately 10–30 minutes on a standard desktop computer with a stable internet connection.
 
 ## Demonstration
-All figures can be reproduced by executing the Rmd documents in /Figure_Code/ Each document will load required packages and data when executed. Some of these documents load intermediate files from /Intermediate Files Used in Plots/ that were generated in scripts contained in /Functions and General Analysis Code/ When this occurs, it is indicated in the figure markdown document. 
+All figures can be reproduced by executing the Rmd documents in /Figure_Code/ Each document will load required packages and data when executed. Some of these documents load intermediate files from /Intermediate Files Used in Plots/ that were generated in scripts contained in /Functions and General Analysis Code/ When this occurs, it is indicated in the R markdown document. 
 
 ### Immunoprint Demonstration
-Immunoprint can be executed as follows. On a data set of this size, expected run time is less than five minutes. 
-```{r}
+
+Immunoprint can be executed as follows. On a data set of this size, expected run time is less than five minutes.
+
+```r
 library(readr)
 library(dplyr)
 library(here)
 
 # Define paths relative to the root of the cloned repository
-
 directory_path <- here::here()
-  
-# Define required paths for loading data and immunoprint
-folder_path <- paste0(directory_path, "/Supplemental Tables/") # directory containing downloaded data sets
-folder_path_code <- paste0(directory_path, "/Functions and General Analysis Code/") # path to directory containing immunoprint code
+folder_path <- paste0(directory_path, "/Supplemental Tables/")
+folder_path_code <- paste0(directory_path, "/Functions and General Analysis Code/")
 
-# Load immunoprint function
+# Load Immunoprint function
 source(paste0(folder_path_code, "Immunoprint functions.R"))
 
-# Load Data
+# Load data
 combined_metadata_dist <- read_csv(paste0(folder_path, "Data Table S1.csv"))
 all_zs_combined <- read_csv(paste0(folder_path, "Data Table S2.csv"))
 Viral_Annotations <- read_csv(paste0(folder_path, "Data Table S4.csv"))
 
-# Filter to immunoprint validation dataset and divide samples into two partitions for demonstration purposes
-Imm_Val_Metadata <- combined_metadata_dist %>% filter(imm_val == TRUE)
-  database_samps <- Imm_Val_Metadata %>%
-    distinct(identifier) %>%
-    sample_frac(2/3) %>%
-    pull(identifier)
-  new_samps <- Imm_Val_Metadata %>%
-    distinct(identifier) %>%
-    filter(!identifier %in% database_samps) %>%
-    pull(identifier)
+# Filter to Immunoprint validation dataset and divide samples into two partitions
+Imm_Val_Metadata <- combined_metadata_dist %>%
+  filter(imm_val == TRUE)
 
-# Execute immunoprint
-# USAGE: immunoprint(Z_frame1, Z_frame2, prev, keepALL) where Z_frame1 and Z_frame2 are data frames with an “id” column containing peptide ids and all other columns contain epitope binding signals for donors indicated in the column name. prev is a data frame that must contain and “id” column that maps to the “id” columns in Z_frame1 and Z_frame2 and a public_epitope_2015 column indicating whether or not a peptide contains a public epitope. Data Table S4 was input as “prev” for all analysis. “keepALL” indicates whether the function output should include Immunoprint scores for all pairwise comparisons (=TRUE) or for just the pairwise comparisons identified as Immunoprint matches (=FALSE; default)
+database_samps <- Imm_Val_Metadata %>%
+  distinct(identifier) %>%
+  sample_frac(2/3) %>%
+  pull(identifier)
+
+new_samps <- Imm_Val_Metadata %>%
+  distinct(identifier) %>%
+  filter(!identifier %in% database_samps) %>%
+  pull(identifier)
+
+# Execute Immunoprint
+# USAGE: immunoprint(Z_frame1, Z_frame2, prev, keepAll)
+# Z_frame1 and Z_frame2 are data frames with an "id" column containing peptide ids;
+# all other columns contain epitope binding signals for samples indicated by column name.
+# prev must contain an "id" column and a public_epitope_2015 column.
+# keepAll = TRUE returns Immunoprint scores for all pairwise comparisons.
 immunoprint(
-    all_zs_combined %>% select(id, all_of(new_samps)),
-    all_zs_combined %>% select(id, all_of(database_samps)),
-    Viral_Annotations,
-    keepAll = TRUE
-  )
-# immunoprint_match column indicates whether the samples were predicted to be from the same donor (TRUE) or not (FALSE); Score indicates the value of the immunoprint score.
-
+  all_zs_combined %>% select(id, all_of(new_samps)),
+  all_zs_combined %>% select(id, all_of(database_samps)),
+  Viral_Annotations,
+  keepAll = TRUE
+)
 ```
+
+The `immunoprint_match` column indicates whether samples were predicted to be from the same donor (`TRUE`) or not (`FALSE`). `Score` indicates the value of the Immunoprint score.
