@@ -4,7 +4,7 @@ output: html_notebook
 ---
 
 ```{r}
-easypackages::libraries(c("readr","readxl","dplyr","tidyr","ggplot2","ggpubr","forcats","data.table","pheatmap"))
+easypackages::libraries(c("readr","readxl","dplyr","tidyr","ggplot2","ggpubr","forcats","data.table","pheatmap","here"))
 # insert path to folders
 # Define paths relative to the root of the cloned GitHub repository
 directory_path <- here::here()
