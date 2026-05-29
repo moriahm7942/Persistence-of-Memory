@@ -1,9 +1,7 @@
 
 ---
 title: "Figure_1_Table_1-2"
-output:
-  github_document:
-    toc: false
+output: html_notebook
 ---
 
 ```{r}
